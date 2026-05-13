@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **User skills can now be scoped to specific repositories, Linear teams, or Linear labels** — Skills synced from cyrus-hosted with `repositoryIds`, `linearTeamIds`, or `linearLabelIds` are only loaded into sessions whose context matches every populated dimension (AND across dimensions, OR within each list). Unscoped skills continue to load for every session, and old payloads without scope fields keep working as global. Scope is persisted as a `scope.json` sidecar alongside `SKILL.md` and enforced at runtime via the Claude Agent SDK's `skills` option so the model can't see or invoke out-of-scope skills. ([CYPACK-1156](https://linear.app/ceedar/issue/CYPACK-1156), [#1205](https://github.com/cyrusagents/cyrus/pull/1205))
 - **Shared auto-memory across Slack chat sessions** — Slack-triggered chat sessions now share a persistent Claude auto-memory directory at `<cyrusHome>/slack-memory/`, so memory built up in one Slack thread carries over to every other Slack thread. ([CYPACK-1190](https://linear.app/ceedar/issue/CYPACK-1190), [#1199](https://github.com/cyrusagents/cyrus/pull/1199))
 
 ### Fixed

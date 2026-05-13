@@ -163,7 +163,10 @@ import {
 import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
-import { SkillsPluginResolver } from "./SkillsPluginResolver.js";
+import {
+	type SkillSessionContext,
+	SkillsPluginResolver,
+} from "./SkillsPluginResolver.js";
 import { SlackChatAdapter } from "./SlackChatAdapter.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
@@ -4374,6 +4377,7 @@ ${taskSection}`;
 					undefined, // maxTurns
 					undefined, // mcpOptions
 					linearWorkspaceId,
+					this.buildSkillSessionContext(primaryRepo, fullIssue),
 				);
 
 			log.debug(
@@ -5063,6 +5067,34 @@ ${taskSection}`;
 	 */
 	private async fetchIssueLabels(issue: Issue): Promise<string[]> {
 		return this.promptBuilder.fetchIssueLabels(issue);
+	}
+
+	/**
+	 * Build the session context used to evaluate per-skill scope restrictions.
+	 *
+	 * Skill scopes (persisted in `scope.json` sidecars by the config-updater)
+	 * match against:
+	 * - the active repository's Cyrus config ID,
+	 * - the Linear team that owns the issue, and
+	 * - the Linear label IDs attached to the issue.
+	 */
+	private buildSkillSessionContext(
+		repository: RepositoryConfig,
+		fullIssue?: Issue,
+	): SkillSessionContext {
+		const context: SkillSessionContext = {
+			repositoryId: repository.id,
+		};
+		if (fullIssue?.teamId) {
+			context.linearTeamId = fullIssue.teamId;
+		}
+		if (
+			Array.isArray(fullIssue?.labelIds) &&
+			(fullIssue?.labelIds?.length ?? 0) > 0
+		) {
+			context.linearLabelIds = [...(fullIssue?.labelIds ?? [])];
+		}
+		return context;
 	}
 
 	/**
@@ -5804,8 +5836,18 @@ ${taskSection}`;
 			systemPrompt = sharedInstructions;
 		}
 
-		// 3. Append skills guidance — instruct the agent to use skills based on context
-		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance();
+		// 3. Append skills guidance — instruct the agent to use skills based on context.
+		// Skills hidden by per-skill scope (repo / Linear team / Linear label) are
+		// omitted from the guidance so the model doesn't reference skills it
+		// cannot invoke.
+		const skillsContext = this.buildSkillSessionContext(
+			repositories[0]!,
+			input.fullIssue,
+		);
+		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance(
+			undefined,
+			skillsContext,
+		);
 
 		// 4. Append agent context — dynamic values for skills to reference
 		systemPrompt += this.buildAgentContextBlock();
@@ -6041,12 +6083,25 @@ ${input.userComment}
 		maxTurns?: number,
 		mcpOptions?: { excludeSlackMcp?: boolean },
 		linearWorkspaceId?: string,
+		skillContext?: SkillSessionContext,
 	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
 		const log = this.logger.withContext({
 			sessionId,
 			platform: session.issueContext?.trackerId,
 			issueIdentifier: session.issueContext?.issueIdentifier,
 		});
+
+		// Resolve plugins once so we can also derive the per-session scoped
+		// skill allow-list from the same filesystem snapshot.
+		const plugins = await this.skillsPluginResolver.resolve();
+		const resolvedSkillContext: SkillSessionContext = skillContext ?? {
+			repositoryId: repository.id,
+		};
+		const allowedSkillNames =
+			await this.skillsPluginResolver.discoverSkillNames(
+				plugins,
+				resolvedSkillContext,
+			);
 
 		const result = this.runnerConfigBuilder.buildIssueConfig({
 			session,
@@ -6064,7 +6119,8 @@ ${input.userComment}
 			linearWorkspaceId,
 			cyrusHome: this.cyrusHome,
 			logger: log,
-			plugins: await this.skillsPluginResolver.resolve(),
+			plugins,
+			skills: allowedSkillNames,
 			sandboxSettings: this.sdkSandboxSettings ?? undefined,
 			egressCaCertPath: this.egressCaCertPath ?? undefined,
 			onMessage: (message: SDKMessage) => {
@@ -6817,6 +6873,7 @@ ${input.userComment}
 				maxTurns, // Pass maxTurns if specified
 				undefined, // mcpOptions
 				resolvedWorkspaceId,
+				this.buildSkillSessionContext(repository, fullIssue),
 			);
 
 		// Create the appropriate runner based on session state

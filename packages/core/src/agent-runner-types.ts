@@ -452,6 +452,17 @@ export interface AgentRunnerConfig {
 	/** Plugins that provide skills, agents, hooks, and MCP servers to the session */
 	plugins?: SdkPluginConfig[];
 	/**
+	 * Optional allow-list of skill names enabled for the session. Mirrors the
+	 * Claude Agent SDK's `skills` option:
+	 * - `undefined`: no filter (provider defaults).
+	 * - `'all'`: enable every discovered skill.
+	 * - `string[]`: enable only the listed skills.
+	 *
+	 * Used to enforce per-skill scope (repository / Linear team / Linear label).
+	 * Only the Claude runner respects this today.
+	 */
+	skills?: string[] | "all";
+	/**
 	 * Callback for handling AskUserQuestion tool invocations.
 	 * When provided, intercepts the AskUserQuestion tool to allow presenting
 	 * questions to users via external interfaces (e.g., Linear's select signal).
