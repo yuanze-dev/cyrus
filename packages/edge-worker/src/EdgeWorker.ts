@@ -1048,6 +1048,9 @@ export class EdgeWorker extends EventEmitter {
 						fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
 					});
 				},
+				// Live read so hot-reloaded config (`setConfig`) picks up new
+				// per-platform MCP paths without rebuilding the handler.
+				getPlatformMcpConfigOverrides: () => this.config.slackMcpConfigs,
 				onWebhookStart: () => {
 					this.activeWebhookCount++;
 				},
@@ -1381,11 +1384,12 @@ export class EdgeWorker extends EventEmitter {
 					)
 				: this.buildGitHubSystemPrompt(event, branchRef, taskInstructions);
 
-			// Build allowed tools and directories
-			// Exclude Slack MCP tools from GitHub sessions
-			const allowedTools = this.buildAllowedTools(repository).filter(
-				(t) => t !== "mcp__slack",
-			);
+			// Build allowed tools using the GitHub platform resolver, which honors
+			// `githubAllowedTools` on the workspace config and falls back to
+			// `GITHUB_DEFAULT_ALLOWED_TOOLS` (which intentionally omits
+			// `mcp__slack` — no subtractive filtering needed).
+			const allowedTools =
+				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
 			const allowedDirectories: string[] = [repository.repositoryPath];
 
@@ -1403,7 +1407,9 @@ export class EdgeWorker extends EventEmitter {
 					undefined, // labels
 					undefined, // issueDescription
 					200, // maxTurns
-					{ excludeSlackMcp: true }, // Exclude Slack MCP server from GitHub sessions
+					undefined, // linearWorkspaceId
+					undefined, // skillContext
+					"github", // sessionPlatform → uses githubMcpConfigs override
 				);
 
 			const runner = this.createRunnerForType(runnerType, runnerConfig);
@@ -2047,11 +2053,11 @@ ${taskSection}`;
 					)
 				: this.buildGitLabSystemPrompt(event, branchRef, taskInstructions);
 
-			// Build allowed tools and directories
-			// Exclude Slack MCP tools from GitLab sessions
-			const allowedTools = this.buildAllowedTools(repository).filter(
-				(t) => t !== "mcp__slack",
-			);
+			// Build allowed tools using the GitHub platform resolver — GitLab and
+			// GitHub share the same PR-targeted, single-repo intent, so they use
+			// the same `githubAllowedTools` knob and the same `GITHUB_*` default.
+			const allowedTools =
+				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
 			const allowedDirectories: string[] = [repository.repositoryPath];
 
@@ -2069,7 +2075,9 @@ ${taskSection}`;
 					undefined, // labels
 					undefined, // issueDescription
 					200, // maxTurns
-					{ excludeSlackMcp: true }, // Exclude Slack MCP server from GitLab sessions
+					undefined, // linearWorkspaceId
+					undefined, // skillContext
+					"gitlab", // sessionPlatform → uses githubMcpConfigs override
 				);
 
 			const runner = this.createRunnerForType(runnerType, runnerConfig);
@@ -4388,7 +4396,6 @@ ${taskSection}`;
 					labels, // Pass labels for runner selection and model override
 					fullIssue.description || undefined, // Description tags can override label selectors
 					undefined, // maxTurns
-					undefined, // mcpOptions
 					linearWorkspaceId,
 					this.buildSkillSessionContext(primaryRepo, fullIssue),
 				);
@@ -6232,9 +6239,14 @@ ${input.userComment}
 		labels?: string[],
 		issueDescription?: string,
 		maxTurns?: number,
-		mcpOptions?: { excludeSlackMcp?: boolean },
 		linearWorkspaceId?: string,
 		skillContext?: SkillSessionContext,
+		/**
+		 * Which platform initiated the session — drives which
+		 * `EdgeWorkerConfig.<platform>McpConfigs` override list applies.
+		 * Defaults to `"linear"` (the pre-platform-aware behavior).
+		 */
+		sessionPlatform: "linear" | "github" | "gitlab" = "linear",
 	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
 		const log = this.logger.withContext({
 			sessionId,
@@ -6266,7 +6278,17 @@ ${input.userComment}
 			labels,
 			issueDescription,
 			maxTurns,
-			mcpOptions,
+			// Per-platform MCP config paths — GitHub + GitLab share the
+			// `githubMcpConfigs` knob (single-repo PR contexts both); Linear
+			// gets `linearMcpConfigs`. Not a blanket override: the builder
+			// uses `repository.mcpConfigPath` when this repo has its own
+			// `allowedTools` override (so the repo's permission rules and
+			// MCP server set travel as a unit), and only falls through to
+			// this list when the repo inherits the platform allow-list.
+			platformMcpConfigOverrides:
+				sessionPlatform === "linear"
+					? this.config.linearMcpConfigs
+					: this.config.githubMcpConfigs,
 			linearWorkspaceId,
 			cyrusHome: this.cyrusHome,
 			logger: log,
@@ -6550,9 +6572,22 @@ ${input.userComment}
 						session.id,
 					);
 
-					// Merge any file-based MCP configs (reuses shared normalization)
-					const mcpConfigPath =
-						this.mcpConfigService.buildMergedMcpConfigPath(repo);
+					// Merge any file-based MCP configs (reuses shared normalization).
+					// Warmup paths reconstruct Linear-triggered issue sessions:
+					// if the repo has its own `allowedTools` override its
+					// mcpConfigPath stays scoped to that repo, otherwise the
+					// team-level `linearMcpConfigs` list applies. Same coupling
+					// the live `buildIssueConfig` path uses.
+					const repoHasAllowedToolsOverride =
+						Array.isArray(repo.allowedTools) && repo.allowedTools.length > 0;
+					const mcpConfigPath = repoHasAllowedToolsOverride
+						? this.mcpConfigService.buildMergedMcpConfigPath(repo)
+						: this.config.linearMcpConfigs &&
+								this.config.linearMcpConfigs.length > 0
+							? this.config.linearMcpConfigs.length === 1
+								? this.config.linearMcpConfigs[0]
+								: [...this.config.linearMcpConfigs]
+							: undefined;
 					let mcpServers: Record<string, McpServerConfig> = { ...mcpConfig };
 					if (mcpConfigPath) {
 						const paths = Array.isArray(mcpConfigPath)
@@ -7022,7 +7057,6 @@ ${input.userComment}
 				labels, // Always pass labels to preserve model override
 				fullIssue.description || undefined, // Description tags can override label selectors
 				maxTurns, // Pass maxTurns if specified
-				undefined, // mcpOptions
 				resolvedWorkspaceId,
 				this.buildSkillSessionContext(repository, fullIssue),
 			);

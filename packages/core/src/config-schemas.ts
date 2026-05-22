@@ -381,11 +381,75 @@ export const EdgeConfigSchema = z.object({
 	/** Optional path to global setup script that runs for all repositories */
 	global_setup_script: z.string().optional(),
 
-	/** Default tools to allow across all repositories */
+	/**
+	 * Allowed tools for Linear-triggered agent sessions. Renamed from the
+	 * old `defaultAllowedTools` to make the platform scope explicit alongside
+	 * `slackAllowedTools` and `githubAllowedTools`.
+	 */
+	linearAllowedTools: z.array(z.string()).optional(),
+
+	/**
+	 * @deprecated Use linearAllowedTools instead. Legacy field retained for
+	 * older self-host CLI consumers that still write the old name; migrated
+	 * forward on load via `migrateEdgeConfig`.
+	 */
 	defaultAllowedTools: z.array(z.string()).optional(),
 
 	/** Tools to explicitly disallow across all repositories */
 	defaultDisallowedTools: z.array(z.string()).optional(),
+
+	/**
+	 * Allowed tools for Slack @mention chat sessions. When set, overrides the
+	 * built-in read-only chat tool set used by ToolPermissionResolver. The
+	 * workspace MCP tool prefixes (mcp__linear, mcp__cyrus-tools, etc.) are
+	 * still appended automatically.
+	 */
+	slackAllowedTools: z.array(z.string()).optional(),
+
+	/**
+	 * Allowed tools for GitHub-triggered agent sessions. When set, overrides
+	 * `linearAllowedTools` specifically for sessions originating from GitHub
+	 * (PR comments, automated fix-on-failure flows, etc.).
+	 */
+	githubAllowedTools: z.array(z.string()).optional(),
+
+	/**
+	 * Filesystem paths to custom-integration MCP config JSON files (Claude
+	 * Code `.mcp.json` format) the runtime should load for Slack `@mention`
+	 * chat sessions. Chat sessions are repo-agnostic, so
+	 * `repository.mcpConfigPath` is not consulted here — only this list
+	 * determines which custom `.mcp.json` files load for Slack. When
+	 * omitted/empty, no custom files load (native MCP servers — Linear,
+	 * Cyrus tools, Slack MCP, Cyrus docs — still run as usual).
+	 *
+	 * The per-platform lists let cyrus-hosted route custom MCP server
+	 * availability per surface — e.g. expose `slack-mcp-server` only on
+	 * Slack, or scope a Supabase MCP to GitHub PR sessions but not Linear
+	 * issue work. Each entry is passed as-is to Claude Code's
+	 * `--mcp-config` mechanism.
+	 */
+	slackMcpConfigs: z.array(z.string()).optional(),
+
+	/**
+	 * Filesystem paths to custom-integration MCP config JSON files for
+	 * Linear-triggered agent sessions. NOT a blanket override — this list
+	 * is only consulted when the routed repo does NOT have its own
+	 * `allowedTools` override. If the repo has its own allow-list set, the
+	 * agent uses `repository.mcpConfigPath` instead so the repo's
+	 * permission rules and its server set always come from the same scope.
+	 * When omitted/empty AND the repo has no override, no custom `.mcp.json`
+	 * files load.
+	 */
+	linearMcpConfigs: z.array(z.string()).optional(),
+
+	/**
+	 * Filesystem paths to custom-integration MCP config JSON files for
+	 * GitHub/GitLab-triggered agent sessions. Same repo-override-coupling
+	 * semantics as `linearMcpConfigs`: only consulted when the routed repo
+	 * does not have its own `allowedTools` override; otherwise the repo's
+	 * `mcpConfigPath` is used.
+	 */
+	githubMcpConfigs: z.array(z.string()).optional(),
 
 	/**
 	 * Whether to trigger agent sessions when issue title, description, or attachments are updated.
@@ -439,9 +503,20 @@ export const EdgeConfigPayloadSchema = EdgeConfigSchema.extend({
  * returns the config unchanged.
  */
 export function migrateEdgeConfig(
-	raw: Record<string, unknown>,
+	input: Record<string, unknown>,
 ): Record<string, unknown> {
-	// Already migrated or no repositories — nothing to do
+	// `defaultAllowedTools` → `linearAllowedTools`. Older self-host CLIs and
+	// any config file written before the rename still ship the old key; fold
+	// it forward in-place. We do NOT delete the old key — newer consumers
+	// ignore it, and an older runtime that still reads the old key keeps
+	// working until it's upgraded.
+	const raw: Record<string, unknown> =
+		Array.isArray(input.defaultAllowedTools) &&
+		input.linearAllowedTools === undefined
+			? { ...input, linearAllowedTools: input.defaultAllowedTools }
+			: input;
+
+	// Already migrated or no repositories — nothing else to do
 	if (raw.linearWorkspaces || !Array.isArray(raw.repositories)) {
 		return raw;
 	}

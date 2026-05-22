@@ -28,7 +28,6 @@ export interface IMcpConfigProvider {
 		repoId: string,
 		linearWorkspaceId: string,
 		parentSessionId?: string,
-		options?: { excludeSlackMcp?: boolean },
 	): Record<string, McpServerConfig>;
 	buildMergedMcpConfigPath(
 		repositories: RepositoryConfig | RepositoryConfig[],
@@ -75,10 +74,22 @@ export interface ChatRunnerConfigInput {
 	platformName: string;
 	/** Linear workspace ID for building fresh MCP config at session start */
 	linearWorkspaceId?: string;
-	/** Repository to source user-configured MCP paths from (V1: first available repo) */
+	/** Repository whose MCP runtime servers (Linear MCP, Cyrus tools, etc.) get
+	 * spun up for this chat session — chat sessions are repo-agnostic at the
+	 * session level, so this just picks one repo to seed those native servers. */
 	repository?: RepositoryConfig;
 	/** Repository paths the chat session can read */
 	repositoryPaths?: string[];
+	/**
+	 * Filesystem paths to custom-integration `.mcp.json` files to load for
+	 * this chat session (sourced from `EdgeWorkerConfig.slackMcpConfigs` for
+	 * Slack). Chat sessions are repo-agnostic, so `repository.mcpConfigPath`
+	 * is not consulted here — only this list determines which custom MCP
+	 * files the session loads. When empty/omitted, no custom `.mcp.json`
+	 * files are loaded (native servers built via `mcpConfigProvider` still
+	 * run as usual).
+	 */
+	platformMcpConfigOverrides?: readonly string[];
 	logger: ILogger;
 	onMessage: (message: SDKMessage) => void | Promise<void>;
 	onError: (error: Error) => void;
@@ -99,7 +110,17 @@ export interface IssueRunnerConfigInput {
 	labels?: string[];
 	issueDescription?: string;
 	maxTurns?: number;
-	mcpOptions?: { excludeSlackMcp?: boolean };
+	/**
+	 * Filesystem paths to custom-integration `.mcp.json` files for this
+	 * issue session: `EdgeWorkerConfig.linearMcpConfigs` for Linear, or
+	 * `githubMcpConfigs` for GitHub/GitLab. The list is NOT a blanket
+	 * override — it's only consulted when the routed repo does NOT have its
+	 * own `allowedTools` override. If the repo has its own allow-list set,
+	 * the agent uses `repository.mcpConfigPath` instead so the repo's
+	 * permission rules and its server set always come from the same scope
+	 * (see `buildIssueConfig`).
+	 */
+	platformMcpConfigOverrides?: readonly string[];
 	linearWorkspaceId?: string;
 	cyrusHome: string;
 	logger: ILogger;
@@ -155,10 +176,20 @@ export class RunnerConfigBuilder {
 	 * config without hooks or model selection.
 	 */
 	buildChatConfig(input: ChatRunnerConfigInput): AgentRunnerConfig {
-		// Derive user-configured MCP config path from the repository
-		const mcpConfigPath = input.repository
-			? this.mcpConfigProvider.buildMergedMcpConfigPath(input.repository)
-			: undefined;
+		// MCP config paths for chat sessions come exclusively from the
+		// platform override list (e.g. `slackMcpConfigs`). Chat sessions
+		// are repo-agnostic at the session level — we do NOT fall back to
+		// "first repo wins" `repository.mcpConfigPath` (the prior V1
+		// default), because that arbitrarily privileged whichever repo
+		// loaded first. When the platform list is empty, the chat
+		// session simply loads no per-repo `.mcp.json` files.
+		const mcpConfigPath =
+			input.platformMcpConfigOverrides &&
+			input.platformMcpConfigOverrides.length > 0
+				? input.platformMcpConfigOverrides.length === 1
+					? input.platformMcpConfigOverrides[0]
+					: [...input.platformMcpConfigOverrides]
+				: undefined;
 
 		// Build fresh MCP config at session start (reads current token from config)
 		// This follows the same pattern as buildIssueConfig — never use a pre-baked config
@@ -296,11 +327,28 @@ export class RunnerConfigBuilder {
 			input.repository.id,
 			resolvedWorkspaceId,
 			input.sessionId,
-			input.mcpOptions,
 		);
-		const mcpConfigPath = this.mcpConfigProvider.buildMergedMcpConfigPath(
-			input.repository,
-		);
+		// Repo-override vs platform-default resolution for MCP config paths:
+		//   - If the routed repo has its own `allowedTools` override, it
+		//     also owns its own MCP config — use `repository.mcpConfigPath`
+		//     so the repo-scoped allow-list lines up with the repo-scoped
+		//     server set. The two travel as a unit.
+		//   - Otherwise the repo inherits the platform's allow-list, and
+		//     should likewise inherit the platform's MCP config list
+		//     (`linearMcpConfigs` / `githubMcpConfigs`).
+		// This guarantees the agent's permission rules and the loaded MCP
+		// server set always come from the same scope.
+		const repoHasAllowedToolsOverride =
+			Array.isArray(input.repository.allowedTools) &&
+			input.repository.allowedTools.length > 0;
+		const mcpConfigPath = repoHasAllowedToolsOverride
+			? this.mcpConfigProvider.buildMergedMcpConfigPath(input.repository)
+			: input.platformMcpConfigOverrides &&
+					input.platformMcpConfigOverrides.length > 0
+				? input.platformMcpConfigOverrides.length === 1
+					? input.platformMcpConfigOverrides[0]
+					: [...input.platformMcpConfigOverrides]
+				: undefined;
 
 		const config: AgentRunnerConfig & Record<string, unknown> = {
 			workingDirectory: input.session.workspace.path,

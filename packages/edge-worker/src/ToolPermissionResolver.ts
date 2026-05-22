@@ -1,10 +1,14 @@
 import {
 	getAllTools,
 	getCoordinatorTools,
-	getReadOnlyTools,
 	getSafeTools,
 } from "cyrus-claude-runner";
 import type { EdgeWorkerConfig, ILogger, RepositoryConfig } from "cyrus-core";
+import {
+	GITHUB_DEFAULT_ALLOWED_TOOLS,
+	LINEAR_DEFAULT_ALLOWED_TOOLS,
+	SLACK_DEFAULT_ALLOWED_TOOLS,
+} from "cyrus-core";
 
 /** Prompt type used for label-based tool/prompt selection */
 export type PromptType =
@@ -15,12 +19,18 @@ export type PromptType =
 	| "graphite-orchestrator";
 
 /**
- * Unified tool permission resolver for both issue sessions and chat sessions.
+ * Unified tool permission resolver for issue, chat, and webhook-triggered
+ * sessions.
  *
- * Provides a single source of truth for:
- * - Repository-based tool resolution (allowed/disallowed)
- * - Chat-mode read-only tool sets with MCP prefixes
- * - Workspace-level MCP tool prefixes
+ * The resolver is **additive only**: it never appends or strips tools after
+ * the explicit list is chosen. The per-platform defaults live in cyrus-core
+ * (`LINEAR_DEFAULT_ALLOWED_TOOLS`, `SLACK_DEFAULT_ALLOWED_TOOLS`,
+ * `GITHUB_DEFAULT_ALLOWED_TOOLS`) and include workspace MCP prefixes
+ * (`mcp__linear`, `mcp__cyrus-tools`, etc.) explicitly. Callers that want a
+ * tighter list pass `linearAllowedTools` / `slackAllowedTools` /
+ * `githubAllowedTools` on `EdgeWorkerConfig`, or set repo-level
+ * `allowedTools`. The repo override is a verbatim replacement, not an
+ * intersection.
  */
 export class ToolPermissionResolver {
 	private config: EdgeWorkerConfig;
@@ -48,7 +58,9 @@ export class ToolPermissionResolver {
 
 		switch (preset) {
 			case "readOnly":
-				return getReadOnlyTools();
+				// Read-only preset for chat sessions falls back to the Slack default
+				// (which encodes the curated read-only set including MCP prefixes).
+				return [...SLACK_DEFAULT_ALLOWED_TOOLS];
 			case "safe":
 				return getSafeTools();
 			case "all":
@@ -62,38 +74,50 @@ export class ToolPermissionResolver {
 	}
 
 	/**
-	 * Build allowed tools for chat sessions.
+	 * Build allowed tools for Slack chat sessions.
 	 *
-	 * Chat sessions get read-only tools plus MCP tool prefixes derived from
-	 * the provided MCP config keys and user-configured MCP server names.
+	 * Returns the team-configured `slackAllowedTools` if set, otherwise the
+	 * built-in `SLACK_DEFAULT_ALLOWED_TOOLS`. Additionally merges any
+	 * user-configured MCP tool entries the caller threads through (used by
+	 * `RunnerConfigBuilder` when a repo declares custom MCP server tools).
 	 *
-	 * @param mcpConfigKeys - Built-in MCP server names (keys from inline McpServerConfig record)
-	 * @param userMcpTools - User-configured MCP tool entries from repository allowedTools (already mcp__* prefixed)
+	 * @param mcpConfigKeys - Built-in MCP server names. Folded in as
+	 *   `mcp__<key>` prefixes only if not already present in the explicit
+	 *   list — the defaults already include the standard prefixes, so this
+	 *   is purely additive for non-standard servers.
+	 * @param userMcpTools - User-configured MCP tool entries from repository
+	 *   `allowedTools` (already `mcp__*` prefixed).
 	 */
 	public buildChatAllowedTools(
 		mcpConfigKeys?: string[],
 		userMcpTools?: string[],
 	): string[] {
+		const baseChatTools =
+			this.config.slackAllowedTools && this.config.slackAllowedTools.length > 0
+				? this.config.slackAllowedTools
+				: [...SLACK_DEFAULT_ALLOWED_TOOLS];
+
 		const mcpToolPermissions = (mcpConfigKeys ?? []).map(
 			(server) => `mcp__${server}`,
 		);
 
 		return Array.from(
 			new Set([
-				...getReadOnlyTools(),
+				...baseChatTools,
 				...mcpToolPermissions,
 				...(userMcpTools ?? []),
-				"Bash(git -C * pull)",
 			]),
 		);
 	}
 
 	/**
-	 * Build allowed tools list with Linear MCP tools automatically included.
-	 * Accepts a single repository or an array for multi-repo sessions.
-	 * For multiple repositories, the result is the union of each repo's allowed tools
-	 * (presets resolved first, then unioned).
-	 * Workspace-level MCP tools are added once regardless of repo count.
+	 * Build allowed tools list for Linear-triggered sessions.
+	 *
+	 * Accepts a single repository or an array for multi-repo sessions. For
+	 * multiple repositories the result is the **union** of each repo's
+	 * resolved list (per-repo presets resolved first, then unioned). When no
+	 * repos are passed, falls back to the workspace `linearAllowedTools`
+	 * (or the Linear platform default when neither is set).
 	 */
 	public buildAllowedTools(
 		repositories: RepositoryConfig | RepositoryConfig[],
@@ -104,46 +128,57 @@ export class ToolPermissionResolver {
 			: [repositories];
 
 		if (repoArray.length === 0) {
-			// No repos — fall back to global defaults or safe tools
-			const baseTools = this.config.defaultAllowedTools || getSafeTools();
-			return [...new Set([...baseTools, ...this.getWorkspaceMcpTools()])];
+			const baseTools = this.config.linearAllowedTools ?? [
+				...LINEAR_DEFAULT_ALLOWED_TOOLS,
+			];
+			return [...new Set(baseTools)];
 		}
 
-		// For each repo, resolve its allowed tools (without MCP — those are added once at the end)
 		const perRepoTools = repoArray.map((repo) =>
 			this.buildAllowedToolsForRepo(repo, promptType),
 		);
-
-		// Union across all repos
 		const unionTools = [...new Set(perRepoTools.flat())];
-
-		// Workspace-level MCP tools added once regardless of repo count
-		const allTools = [
-			...new Set([...unionTools, ...this.getWorkspaceMcpTools()]),
-		];
 
 		const repoNames = repoArray.map((r) => r.name).join(", ");
 		this.logger.debug(
-			`Tool selection for [${repoNames}]: ${allTools.length} tools (union of ${repoArray.length} repo(s))`,
+			`Linear tool selection for [${repoNames}]: ${unionTools.length} tools (union of ${repoArray.length} repo(s))`,
 		);
-
-		return allTools;
+		return unionTools;
 	}
 
 	/**
-	 * Get workspace-level MCP tool prefixes that should always be in allowedTools.
+	 * Build allowed tools list for GitHub-triggered sessions.
+	 *
+	 * GitHub `@mentions` target a single repository via a single PR, so this
+	 * does not perform multi-repo union — it expects exactly one repo. When
+	 * the workspace defines `githubAllowedTools` it is used as the global
+	 * default for resolution (in place of `linearAllowedTools`); otherwise
+	 * we fall back to `GITHUB_DEFAULT_ALLOWED_TOOLS`. Per-repository
+	 * `allowedTools` overrides still take precedence — same priority chain
+	 * as Linear, just with a different platform default at the bottom.
 	 */
-	public getWorkspaceMcpTools(): string[] {
-		// See: https://docs.anthropic.com/en/docs/claude-code/iam#tool-specific-permission-rules
-		const tools = ["mcp__linear", "mcp__cyrus-tools", "mcp__cyrus-docs"];
-		if (process.env.SLACK_BOT_TOKEN?.trim()) {
-			tools.push("mcp__slack");
+	public buildGithubAllowedTools(
+		repository: RepositoryConfig,
+		promptType?: PromptType,
+	): string[] {
+		const platformDefault =
+			this.config.githubAllowedTools &&
+			this.config.githubAllowedTools.length > 0
+				? this.config.githubAllowedTools
+				: [...GITHUB_DEFAULT_ALLOWED_TOOLS];
+
+		const originalDefault = this.config.linearAllowedTools;
+		this.config.linearAllowedTools = platformDefault;
+		try {
+			return this.buildAllowedTools(repository, promptType);
+		} finally {
+			this.config.linearAllowedTools = originalDefault;
 		}
-		return tools;
 	}
 
 	/**
-	 * Resolve allowed tools for a single repository (without workspace MCP tools).
+	 * Resolve allowed tools for a single repository (Linear/GitHub priority
+	 * chain — chat sessions go through `buildChatAllowedTools`).
 	 */
 	private buildAllowedToolsForRepo(
 		repository: RepositoryConfig,
@@ -173,16 +208,20 @@ export class ToolPermissionResolver {
 				this.config.promptDefaults[effectivePromptType].allowedTools,
 			);
 		}
-		// 3. Repository-level allowed tools
+		// 3. Repository-level allowed tools (verbatim — no platform-default
+		//    merging; if the operator narrows the list, they get the narrow
+		//    list).
 		if (repository.allowedTools) {
 			return repository.allowedTools;
 		}
-		// 4. Global default allowed tools
-		if (this.config.defaultAllowedTools) {
-			return this.config.defaultAllowedTools;
+		// 4. Workspace default allowed tools (the platform default the
+		//    surrounding `buildAllowedTools` / `buildGithubAllowedTools`
+		//    swapped in, if any).
+		if (this.config.linearAllowedTools) {
+			return this.config.linearAllowedTools;
 		}
-		// 5. Fall back to safe tools
-		return getSafeTools();
+		// 5. Final fallback — Linear platform default.
+		return [...LINEAR_DEFAULT_ALLOWED_TOOLS];
 	}
 
 	/**
@@ -200,16 +239,13 @@ export class ToolPermissionResolver {
 			: [repositories];
 
 		if (repoArray.length === 0) {
-			// No repos — fall back to global defaults
 			return this.config.defaultDisallowedTools || [];
 		}
 
-		// For each repo, resolve its disallowed tools
 		const perRepoTools = repoArray.map((repo) =>
 			this.buildDisallowedToolsForRepo(repo, promptType),
 		);
 
-		// Intersection: only block a tool if ALL repos block it
 		let intersection: string[];
 		if (perRepoTools.length === 1) {
 			intersection = perRepoTools[0]!;

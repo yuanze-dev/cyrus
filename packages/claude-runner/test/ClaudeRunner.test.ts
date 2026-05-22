@@ -134,6 +134,7 @@ describe("ClaudeRunner", () => {
 						CLAUDE_CODE_ENABLE_TASKS: "true",
 						CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
 					}),
+					strictMcpConfig: true,
 				},
 			});
 		});
@@ -169,6 +170,7 @@ describe("ClaudeRunner", () => {
 						CLAUDE_CODE_ENABLE_TASKS: "true",
 						CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
 					}),
+					strictMcpConfig: true,
 				},
 			});
 		});
@@ -204,6 +206,7 @@ describe("ClaudeRunner", () => {
 						CLAUDE_CODE_ENABLE_TASKS: "true",
 						CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
 					}),
+					strictMcpConfig: true,
 				},
 			});
 		});

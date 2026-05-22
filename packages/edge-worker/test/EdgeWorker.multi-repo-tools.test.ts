@@ -133,7 +133,10 @@ vi.mock("fs/promises", () => ({
 }));
 
 import { LinearClient } from "@linear/sdk";
-import { getReadOnlyTools, getSafeTools } from "cyrus-claude-runner";
+import {
+	LINEAR_DEFAULT_ALLOWED_TOOLS,
+	SLACK_DEFAULT_ALLOWED_TOOLS,
+} from "cyrus-core";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
@@ -158,7 +161,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
 			cyrusHome: TEST_CYRUS_HOME,
-			defaultAllowedTools: ["Read", "Write", "Edit"],
+			linearAllowedTools: ["Read", "Write", "Edit"],
 			repositories: [
 				{
 					id: "repo-a",
@@ -267,16 +270,9 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB]);
 
-			// Union of [Read, Write] and [Read, Bash, Edit] + MCP tools
-			expect(tools).toEqual([
-				"Read",
-				"Write",
-				"Bash",
-				"Edit",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			// Union of [Read, Write] and [Read, Bash, Edit] — verbatim, no
+			// implicit MCP appending.
+			expect(tools).toEqual(["Read", "Write", "Bash", "Edit"]);
 		});
 
 		it("should resolve presets before unioning", () => {
@@ -297,20 +293,18 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB], "debugger");
 
-			// Repo A: readOnly preset, Repo B: custom tools → union
-			const readOnlyTools = getReadOnlyTools();
+			// "readOnly" preset resolves to SLACK_DEFAULT_ALLOWED_TOOLS
+			// (the curated read-only set). Union with repoB's verbatim list.
 			const expectedUnion = [
-				...new Set([...readOnlyTools, "Read", "Bash", "Edit"]),
+				...new Set([...SLACK_DEFAULT_ALLOWED_TOOLS, "Read", "Bash", "Edit"]),
 			];
-			expect(tools).toEqual([
-				...expectedUnion,
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(tools).toEqual(expectedUnion);
 		});
 
-		it("should add workspace MCP tools once regardless of repo count", () => {
+		it("should NOT auto-append workspace MCP prefixes — they live in the explicit defaults", () => {
+			// Repo-level allowedTools are returned verbatim. If the operator
+			// wants mcp__linear etc., they include them in the list (the
+			// platform defaults already do).
 			const repoA: RepositoryConfig = {
 				...mockConfig.repositories[0],
 				allowedTools: ["Read"],
@@ -323,13 +317,11 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB]);
 
-			// MCP tools appear exactly once
-			expect(tools.filter((t) => t === "mcp__linear")).toHaveLength(1);
-			expect(tools.filter((t) => t === "mcp__cyrus-tools")).toHaveLength(1);
-			expect(tools.filter((t) => t === "mcp__cyrus-docs")).toHaveLength(1);
+			expect(tools).toEqual(["Read", "Write"]);
+			expect(tools).not.toContain("mcp__linear");
 		});
 
-		it("should include Slack MCP when SLACK_BOT_TOKEN is set for multi-repo", () => {
+		it("should NOT auto-append mcp__slack regardless of SLACK_BOT_TOKEN", () => {
 			process.env.SLACK_BOT_TOKEN = "xoxb-test-token";
 
 			const repoA: RepositoryConfig = {
@@ -344,40 +336,29 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB]);
 
-			expect(tools).toContain("mcp__slack");
-			expect(tools.filter((t) => t === "mcp__slack")).toHaveLength(1);
+			// mcp__slack only lives in SLACK_DEFAULT_ALLOWED_TOOLS, never
+			// auto-injected into Linear/GitHub paths.
+			expect(tools).not.toContain("mcp__slack");
 		});
 
 		it("should handle empty repository array with global defaults", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([]);
 
-			// Should fall back to global defaultAllowedTools + MCP
-			expect(tools).toEqual([
-				"Read",
-				"Write",
-				"Edit",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			// Falls back to global linearAllowedTools verbatim.
+			expect(tools).toEqual(["Read", "Write", "Edit"]);
 		});
 
-		it("should fall back to safe tools for empty array when no global defaults", () => {
+		it("should fall back to LINEAR_DEFAULT_ALLOWED_TOOLS for empty array when no global defaults", () => {
 			const configNoDefaults: EdgeWorkerConfig = {
 				...mockConfig,
-				defaultAllowedTools: undefined,
+				linearAllowedTools: undefined,
 			};
 			const ew = new EdgeWorker(configNoDefaults);
 			const buildAllowedTools = getBuildAllowedTools(ew);
 			const tools = buildAllowedTools([]);
 
-			expect(tools).toEqual([
-				...getSafeTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(tools).toEqual([...LINEAR_DEFAULT_ALLOWED_TOOLS]);
 		});
 
 		it("should still work with a single repository (backwards compatible)", () => {
@@ -389,13 +370,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools(repository);
 
-			expect(tools).toEqual([
-				"Read",
-				"Write",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(tools).toEqual(["Read", "Write"]);
 		});
 
 		it("should union tools from 3 repositories", () => {
@@ -421,14 +396,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB, repoC]);
 
-			expect(tools).toEqual([
-				"Read",
-				"Write",
-				"Bash",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(tools).toEqual(["Read", "Write", "Bash"]);
 		});
 	});
 

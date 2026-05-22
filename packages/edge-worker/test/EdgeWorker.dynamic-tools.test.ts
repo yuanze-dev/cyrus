@@ -1,3 +1,7 @@
+import {
+	LINEAR_DEFAULT_ALLOWED_TOOLS,
+	SLACK_DEFAULT_ALLOWED_TOOLS,
+} from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
@@ -105,11 +109,7 @@ vi.mock("fs/promises", () => ({
 
 import { readFile } from "node:fs/promises";
 import { LinearClient } from "@linear/sdk";
-import {
-	getAllTools,
-	getReadOnlyTools,
-	getSafeTools,
-} from "cyrus-claude-runner";
+import { getAllTools, getSafeTools } from "cyrus-claude-runner";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { EdgeWorker } from "../src/EdgeWorker.js";
@@ -137,7 +137,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 		mockConfig = {
 			proxyUrl: "http://localhost:3000",
 			cyrusHome: TEST_CYRUS_HOME,
-			defaultAllowedTools: ["Read", "Write", "Edit"],
+			linearAllowedTools: ["Read", "Write", "Edit"],
 			repositories: [
 				{
 					id: "test-repo",
@@ -251,34 +251,23 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 
-			// Test debugger prompt with readOnly preset
+			// Resolver returns the resolved list verbatim — no implicit MCP
+			// appending. MCP prefixes live in the explicit platform defaults
+			// (LINEAR_DEFAULT_ALLOWED_TOOLS etc.) and only appear here when a
+			// preset/list includes them.
+
+			// Test debugger prompt with readOnly preset (resolves to the
+			// Slack platform default — the curated read-only set).
 			const debuggerTools = buildAllowedTools(repository, "debugger");
-			expect(debuggerTools).toEqual([
-				...getReadOnlyTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(debuggerTools).toEqual([...SLACK_DEFAULT_ALLOWED_TOOLS]);
 
-			// Test builder prompt with custom array
+			// Test builder prompt with custom array (returned verbatim).
 			const builderTools = buildAllowedTools(repository, "builder");
-			expect(builderTools).toEqual([
-				"Read",
-				"Edit",
-				"Task",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(builderTools).toEqual(["Read", "Edit", "Task"]);
 
-			// Test scoper prompt with safe preset
+			// Test scoper prompt with safe preset.
 			const scoperTools = buildAllowedTools(repository, "scoper");
-			expect(scoperTools).toEqual([
-				...getSafeTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(scoperTools).toEqual([...getSafeTools()]);
 		});
 
 		it("should use global prompt defaults when repository-specific config is not available", () => {
@@ -304,33 +293,15 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				...mockConfig.repositories[0],
 			};
 
-			// Test debugger prompt with global all preset
+			// Verbatim returns — no implicit MCP appending.
 			const debuggerTools = buildAllowedTools(repository, "debugger");
-			expect(debuggerTools).toEqual([
-				...getAllTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(debuggerTools).toEqual([...getAllTools()]);
 
-			// Test builder prompt with global safe preset
 			const builderTools = buildAllowedTools(repository, "builder");
-			expect(builderTools).toEqual([
-				...getSafeTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(builderTools).toEqual([...getSafeTools()]);
 
-			// Test scoper prompt with global custom array
 			const scoperTools = buildAllowedTools(repository, "scoper");
-			expect(scoperTools).toEqual([
-				"Read",
-				"WebFetch",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(scoperTools).toEqual(["Read", "WebFetch"]);
 		});
 
 		it("should fall back to repository-level allowed tools when no prompt type is specified", () => {
@@ -342,13 +313,8 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools(repository);
 
-			expect(tools).toEqual([
-				"Read",
-				"Write",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			// Verbatim — no implicit MCP appending.
+			expect(tools).toEqual(["Read", "Write"]);
 		});
 
 		it("should fall back to global default allowed tools when no other config is available", () => {
@@ -359,21 +325,14 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools(repository);
 
-			// Should use global defaultAllowedTools from mockConfig
-			expect(tools).toEqual([
-				"Read",
-				"Write",
-				"Edit",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			// Uses the explicit linearAllowedTools from mockConfig verbatim.
+			expect(tools).toEqual(["Read", "Write", "Edit"]);
 		});
 
-		it("should fall back to safe tools when no configuration is provided", () => {
+		it("should fall back to the Linear platform default when no configuration is provided", () => {
 			const configWithoutDefaults: EdgeWorkerConfig = {
 				...mockConfig,
-				defaultAllowedTools: undefined,
+				linearAllowedTools: undefined,
 			};
 
 			const edgeWorkerNoDefaults = new EdgeWorker(configWithoutDefaults);
@@ -384,34 +343,21 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			};
 
 			const tools = buildAllowedTools(repository);
-			expect(tools).toEqual([
-				...getSafeTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			// LINEAR_DEFAULT_ALLOWED_TOOLS already includes mcp__linear,
+			// mcp__cyrus-tools, mcp__cyrus-docs explicitly — no appending.
+			expect(tools).toEqual([...LINEAR_DEFAULT_ALLOWED_TOOLS]);
 		});
 
-		it("should always include Linear MCP tools", () => {
-			const repository: RepositoryConfig = {
-				...mockConfig.repositories[0],
-				allowedTools: ["Read", "mcp__linear"], // Already includes Linear MCP
-			};
-
-			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
-			const tools = buildAllowedTools(repository);
-
-			// Should deduplicate Linear MCP tools
-			expect(tools).toEqual([
-				"Read",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
-			expect(tools.filter((t) => t === "mcp__linear")).toHaveLength(1);
+		it("LINEAR_DEFAULT_ALLOWED_TOOLS explicitly includes the workspace MCP prefixes", () => {
+			// The default lives in cyrus-core. This test pins the contract — if
+			// the constant ever stops including these prefixes, repository
+			// sessions silently lose access to them and we should fail loud.
+			expect(LINEAR_DEFAULT_ALLOWED_TOOLS).toContain("mcp__linear");
+			expect(LINEAR_DEFAULT_ALLOWED_TOOLS).toContain("mcp__cyrus-tools");
+			expect(LINEAR_DEFAULT_ALLOWED_TOOLS).toContain("mcp__cyrus-docs");
 		});
 
-		it("should include Slack MCP tools when SLACK_BOT_TOKEN is set", () => {
+		it("should NOT auto-append mcp__slack regardless of SLACK_BOT_TOKEN — Slack uses its own platform list", () => {
 			const originalSlackToken = process.env.SLACK_BOT_TOKEN;
 			try {
 				process.env.SLACK_BOT_TOKEN = "xoxb-test-slack-token";
@@ -424,43 +370,9 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 				const tools = buildAllowedTools(repository);
 
-				expect(tools).toEqual([
-					"Read",
-					"Write",
-					"mcp__linear",
-					"mcp__cyrus-tools",
-					"mcp__cyrus-docs",
-					"mcp__slack",
-				]);
-			} finally {
-				if (originalSlackToken === undefined) {
-					delete process.env.SLACK_BOT_TOKEN;
-				} else {
-					process.env.SLACK_BOT_TOKEN = originalSlackToken;
-				}
-			}
-		});
-
-		it("should not include Slack MCP tools when SLACK_BOT_TOKEN is not set", () => {
-			const originalSlackToken = process.env.SLACK_BOT_TOKEN;
-			try {
-				delete process.env.SLACK_BOT_TOKEN;
-
-				const repository: RepositoryConfig = {
-					...mockConfig.repositories[0],
-					allowedTools: ["Read", "Write"],
-				};
-
-				const buildAllowedTools = getBuildAllowedTools(edgeWorker);
-				const tools = buildAllowedTools(repository);
-
-				expect(tools).toEqual([
-					"Read",
-					"Write",
-					"mcp__linear",
-					"mcp__cyrus-tools",
-					"mcp__cyrus-docs",
-				]);
+				// Linear path returns the repo list verbatim. mcp__slack lives in
+				// SLACK_DEFAULT_ALLOWED_TOOLS only and is never appended here.
+				expect(tools).toEqual(["Read", "Write"]);
 				expect(tools).not.toContain("mcp__slack");
 			} finally {
 				if (originalSlackToken === undefined) {
@@ -485,25 +397,13 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 
-			// Old format should fall back to repository/global defaults
+			// Old format should fall back to repository/global defaults.
 			const debuggerTools = buildAllowedTools(repository, "debugger");
-			expect(debuggerTools).toEqual([
-				"Read",
-				"Write",
-				"Edit",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(debuggerTools).toEqual(["Read", "Write", "Edit"]);
 
-			// New format should work as expected
+			// New format should work as expected.
 			const builderTools = buildAllowedTools(repository, "builder");
-			expect(builderTools).toEqual([
-				...getSafeTools(),
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(builderTools).toEqual([...getSafeTools()]);
 		});
 
 		it("should handle single tool string in resolveToolPreset", () => {
@@ -520,12 +420,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools(repository, "debugger");
 
-			expect(tools).toEqual([
-				"CustomTool",
-				"mcp__linear",
-				"mcp__cyrus-tools",
-				"mcp__cyrus-docs",
-			]);
+			expect(tools).toEqual(["CustomTool"]);
 		});
 	});
 

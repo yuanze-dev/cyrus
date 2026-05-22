@@ -231,8 +231,18 @@ export class ConfigManager extends EventEmitter {
 				defaultModel: parsedConfig.defaultModel || this.config.defaultModel,
 				defaultFallbackModel:
 					parsedConfig.defaultFallbackModel || this.config.defaultFallbackModel,
-				defaultAllowedTools:
-					parsedConfig.defaultAllowedTools || this.config.defaultAllowedTools,
+				linearAllowedTools:
+					parsedConfig.linearAllowedTools || this.config.linearAllowedTools,
+				slackAllowedTools:
+					parsedConfig.slackAllowedTools || this.config.slackAllowedTools,
+				githubAllowedTools:
+					parsedConfig.githubAllowedTools || this.config.githubAllowedTools,
+				slackMcpConfigs:
+					parsedConfig.slackMcpConfigs || this.config.slackMcpConfigs,
+				linearMcpConfigs:
+					parsedConfig.linearMcpConfigs || this.config.linearMcpConfigs,
+				githubMcpConfigs:
+					parsedConfig.githubMcpConfigs || this.config.githubMcpConfigs,
 				defaultDisallowedTools:
 					parsedConfig.defaultDisallowedTools ||
 					this.config.defaultDisallowedTools,
@@ -328,7 +338,12 @@ export class ConfigManager extends EventEmitter {
 			"cursorDefaultFallbackModel",
 			"defaultModel",
 			"defaultFallbackModel",
-			"defaultAllowedTools",
+			"linearAllowedTools",
+			"slackAllowedTools",
+			"githubAllowedTools",
+			"slackMcpConfigs",
+			"linearMcpConfigs",
+			"githubMcpConfigs",
 			"defaultDisallowedTools",
 			"promptDefaults",
 			"issueUpdateTrigger",
