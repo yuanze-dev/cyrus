@@ -1249,6 +1249,47 @@ export class EdgeWorker extends EventEmitter {
 				this.logger.warn(
 					`No repository configured for GitHub repo: ${repoFullName}`,
 				);
+
+				// Only reply on signals where the user clearly directed something at us:
+				// an explicit @-mention, or a pull_request_review requesting changes.
+				const wasMentioned =
+					!!botUsername && commentBody.includes(`@${botUsername}`);
+				const shouldReply = wasMentioned || isPullRequestReview;
+
+				if (shouldReply && reactionToken && prNumber) {
+					// Presence of CYRUS_API_KEY indicates this worker is paired with the
+					// managed control plane (paid customer). Absence means the worker is
+					// running on the Community plan (self-managed config.json).
+					const isManagedCustomer = !!process.env.CYRUS_API_KEY;
+
+					const commonPreamble = [
+						`Cyrus received this webhook but has no repository configured for \`${repoFullName}\`, so no agent session was started.`,
+						``,
+						`**Likely causes:**`,
+						`- The owner/org was **renamed or transferred** on GitHub. Webhooks are delivered under the current owner name, but Cyrus's stored repository URL still points at the old one. GitHub's web redirects don't apply to webhook payloads — the stored URL has to be updated explicitly.`,
+						`- The stored repository URL has a typo (e.g. wrong org/owner) and doesn't match the repo this event came from.`,
+						`- The GitHub App / webhook is installed on a repo Cyrus isn't configured for at all.`,
+						``,
+					];
+
+					const fix = isManagedCustomer
+						? `**What to do:** there's currently no self-serve way to update the stored repository URL on your plan — please reach out to Cyrus support and reference \`${repoFullName}\` and we'll reconcile it on the backend.`
+						: `**What to do:** open \`~/.cyrus/config.json\` on the worker and update the \`githubUrl\` of the relevant repository to \`https://github.com/${repoFullName}\`. The worker watches the config file and will pick up the change automatically. If this repo shouldn't be sending events to Cyrus at all, remove the GitHub App from it instead.`;
+
+					this.gitHubCommentService
+						.postIssueComment({
+							token: reactionToken,
+							owner: extractRepoOwner(event),
+							repo: extractRepoName(event),
+							issueNumber: prNumber,
+							body: [...commonPreamble, fix].join("\n"),
+						})
+						.catch((err: unknown) => {
+							this.logger.warn(
+								`Failed to post unconfigured-repo notice: ${err instanceof Error ? err.message : err}`,
+							);
+						});
+				}
 				return;
 			}
 
