@@ -39,6 +39,8 @@ function createMockRunnerConfigBuilder(): RunnerConfigBuilder {
 				...(input.resumeSessionId
 					? { resumeSessionId: input.resumeSessionId }
 					: {}),
+				...(input.plugins ? { plugins: input.plugins } : {}),
+				...(input.skills !== undefined ? { skills: input.skills } : {}),
 				logger: input.logger,
 				maxTurns: 200,
 				onMessage: input.onMessage,
@@ -156,6 +158,69 @@ describe("ChatSessionHandler chat session permissions", () => {
 		for (const path of chatRepositoryPaths) {
 			expect(capturedConfig.allowedDirectories).toContain(path);
 		}
+	});
+
+	it("passes scoped managed skills to chat runner configs", async () => {
+		const event: TestEvent = {
+			eventId: "test-event",
+			threadKey: "test-thread",
+		};
+		const cyrusHome = TEST_CYRUS_CHAT;
+		const repository = {
+			id: "repo-a",
+			name: "Repo A",
+			repositoryPath: "/repo/chat-one",
+			allowedTools: [],
+		} as unknown as RepositoryConfig;
+		const chatRepositoryPaths = ["/repo/chat-one"];
+		const plugins = [{ type: "local" as const, path: "/cyrus/user-skills" }];
+		let capturedConfig: any;
+
+		const adapter = new TestChatAdapter("thread-key");
+		const createRunner = vi.fn((config: any) => {
+			capturedConfig = config;
+			return {
+				supportsStreamingInput: false,
+				start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				stop: vi.fn(),
+				isRunning: vi.fn().mockReturnValue(false),
+				isStreaming: vi.fn().mockReturnValue(false),
+				addStreamMessage: vi.fn(),
+				getMessages: vi.fn().mockReturnValue([]),
+			} as any;
+		});
+		const resolveSkillsConfig = vi.fn().mockResolvedValue({
+			plugins,
+			skills: ["agent-browser", "test-user-skills"],
+		});
+
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome,
+			chatRepositoryProvider: createStaticProvider(
+				chatRepositoryPaths,
+				repository,
+				"workspace-1",
+			),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			resolveSkillsConfig,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		await handler.handleEvent(event as any);
+
+		expect(resolveSkillsConfig).toHaveBeenCalledWith({
+			repository,
+			repositoryPaths: chatRepositoryPaths,
+		});
+		expect(capturedConfig.plugins).toEqual(plugins);
+		expect(capturedConfig.skills).toEqual([
+			"agent-browser",
+			"test-user-skills",
+		]);
 	});
 });
 
@@ -337,6 +402,75 @@ describe("ChatSessionHandler processed acknowledgement", () => {
 		expect(postReply).toHaveBeenCalledTimes(2);
 		expect(postReply.mock.calls[0]?.[0]).toBe(eventA);
 		expect(postReply.mock.calls[1]?.[0]).toBe(eventC);
+	});
+});
+
+describe("ChatSessionHandler busy follow-up queueing", () => {
+	it("queues a follow-up that can't be streamed and delivers it after the turn", async () => {
+		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(
+			"busy-thread",
+		);
+		const notifyBusy = vi
+			.spyOn(adapter, "notifyBusy")
+			.mockResolvedValue(undefined);
+		vi.spyOn(adapter, "postReply").mockResolvedValue(undefined);
+
+		let running = false;
+		let capturedConfig: any;
+		const createRunner = vi.fn((config: any) => {
+			capturedConfig = config;
+			running = true; // a freshly created runner is running
+			return {
+				supportsStreamingInput: false,
+				start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				startStreaming: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+				stop: vi.fn(),
+				// Running, but NOT streamable (exec-style backend) — follow-ups
+				// can't be injected mid-turn.
+				isRunning: vi.fn(() => running),
+				isStreaming: vi.fn().mockReturnValue(false),
+				addStreamMessage: vi.fn(),
+				getMessages: vi.fn().mockReturnValue([]),
+			} as any;
+		});
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		// First message starts the session (running).
+		await handler.handleEvent({
+			eventId: "msg-a",
+			threadKey: "busy-thread",
+		} as any);
+		expect(createRunner).toHaveBeenCalledTimes(1);
+
+		// Second message arrives mid-turn → queued (not dropped) + user notified.
+		await handler.handleEvent({
+			eventId: "msg-b",
+			threadKey: "busy-thread",
+		} as any);
+		expect(notifyBusy).toHaveBeenCalledTimes(1);
+		expect(createRunner).toHaveBeenCalledTimes(1); // not yet delivered
+
+		// Turn completes → the queued follow-up is re-dispatched as a new turn.
+		running = false;
+		await capturedConfig.onMessage({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		expect(createRunner).toHaveBeenCalledTimes(2);
 	});
 });
 

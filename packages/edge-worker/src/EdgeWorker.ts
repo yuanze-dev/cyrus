@@ -164,7 +164,10 @@ import {
 	RepositoryRouter,
 	type RepositoryRouterDeps,
 } from "./RepositoryRouter.js";
-import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
+import {
+	RunnerConfigBuilder,
+	resolveIssueMcpConfigPath,
+} from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
 import {
@@ -1101,6 +1104,17 @@ export class EdgeWorker extends EventEmitter {
 				// Live read so hot-reloaded config (`setConfig`) picks up new
 				// per-platform MCP paths without rebuilding the handler.
 				getPlatformMcpConfigOverrides: () => this.config.slackMcpConfigs,
+				resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
+					const plugins = await this.skillsPluginResolver.resolve();
+					const skills = await this.skillsPluginResolver.discoverSkillNames(
+						plugins,
+						{
+							repositoryId: repository?.id,
+							repoPaths: repositoryPaths,
+						},
+					);
+					return { plugins, skills };
+				},
 				onWebhookStart: () => {
 					this.activeWebhookCount++;
 				},
@@ -1643,11 +1657,20 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				existingRunner?.supportsStreamingInput &&
 				existingRunner.addStreamMessage
 			) {
-				existingRunner.addStreamMessage(notification);
-				this.logger.debug(
-					`[base-branch-update] Streamed notification to session ${session.id} for branch ${branchName}`,
-				);
-				break;
+				// Best-effort notification; a steer-only backend may reject it if no
+				// turn is active. Don't let that throw out of the update handler.
+				try {
+					existingRunner.addStreamMessage(notification);
+					this.logger.debug(
+						`[base-branch-update] Streamed notification to session ${session.id} for branch ${branchName}`,
+					);
+					break;
+				} catch (error) {
+					this.logger.debug(
+						`[base-branch-update] Stream rejected for session ${session.id}; skipping`,
+						{ error: error instanceof Error ? error.message : String(error) },
+					);
+				}
 			}
 		}
 	}
@@ -3668,12 +3691,20 @@ ${taskSection}`;
 				existingRunner?.supportsStreamingInput &&
 				existingRunner.addStreamMessage
 			) {
-				existingRunner.addStreamMessage(fullPrompt);
-				delivered = true;
-				this.logger.debug(
-					`[issue-update] Streamed update to session ${sessionId} (key=${webhookKey}, changed=[${changedFields.join(", ")}])`,
-				);
-				break;
+				// Best-effort; a steer-only backend may reject when no turn is active.
+				try {
+					existingRunner.addStreamMessage(fullPrompt);
+					delivered = true;
+					this.logger.debug(
+						`[issue-update] Streamed update to session ${sessionId} (key=${webhookKey}, changed=[${changedFields.join(", ")}])`,
+					);
+					break;
+				} catch (error) {
+					this.logger.debug(
+						`[issue-update] Stream rejected for session ${sessionId}; skipping (key=${webhookKey})`,
+						{ error: error instanceof Error ? error.message : String(error) },
+					);
+				}
 			} else if (isRunning) {
 				this.logger.debug(
 					`[issue-update] Session ${sessionId} is running but doesn't support streaming input, skipping (key=${webhookKey})`,
@@ -6732,16 +6763,13 @@ ${input.userComment}
 					// mcpConfigPath stays scoped to that repo, otherwise the
 					// team-level `linearMcpConfigs` list applies. Same coupling
 					// the live `buildIssueConfig` path uses.
-					const repoHasAllowedToolsOverride =
-						Array.isArray(repo.allowedTools) && repo.allowedTools.length > 0;
-					const mcpConfigPath = repoHasAllowedToolsOverride
-						? this.mcpConfigService.buildMergedMcpConfigPath(repo)
-						: this.config.linearMcpConfigs &&
-								this.config.linearMcpConfigs.length > 0
-							? this.config.linearMcpConfigs.length === 1
-								? this.config.linearMcpConfigs[0]
-								: [...this.config.linearMcpConfigs]
-							: undefined;
+					const mcpConfigPath = resolveIssueMcpConfigPath(
+						repo,
+						this.config.linearMcpConfigs,
+						this.mcpConfigService.buildMergedMcpConfigPath.bind(
+							this.mcpConfigService,
+						),
+					);
 					let mcpServers: Record<string, McpServerConfig> = { ...mcpConfig };
 					if (mcpConfigPath) {
 						const paths = Array.isArray(mcpConfigPath)
@@ -7024,11 +7052,23 @@ ${input.userComment}
 				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
 			}
 
-			existingRunner.addStreamMessage(fullPrompt);
-			return true; // Message added to stream
+			// `addStreamMessage` can reject the message if the turn ended in the
+			// race window between "still running" and "turn finished" (e.g. the
+			// Codex app-server backend, which only steers an active turn). Fall
+			// through to the resume path so the comment is never dropped. Claude's
+			// streaming input never throws here, so this is a no-op for Claude.
+			try {
+				existingRunner.addStreamMessage(fullPrompt);
+				return true; // Message added to stream
+			} catch (error) {
+				log.warn(
+					`Streaming message rejected for ${sessionId}; falling back to resume (${logContext})`,
+					{ error: error instanceof Error ? error.message : String(error) },
+				);
+			}
 		}
 
-		// Not streaming - resume/start session
+		// Not streaming (or streaming was rejected) - resume/start session
 		log.debug(`Resuming Claude session for ${sessionId} (${logContext})`);
 
 		await this.resumeAgentSession(
@@ -7105,8 +7145,18 @@ ${input.userComment}
 			if (attachmentManifest) {
 				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
 			}
-			existingRunner.addStreamMessage(fullPrompt);
-			return;
+			// See handlePromptWithStreamingCheck: a steer-only backend can reject
+			// the message if the turn just ended. Fall through to a fresh resume
+			// turn rather than dropping the comment. No-op for Claude.
+			try {
+				existingRunner.addStreamMessage(fullPrompt);
+				return;
+			} catch (error) {
+				log.warn(
+					`Streaming message rejected for ${sessionId}; falling back to resume`,
+					{ error: error instanceof Error ? error.message : String(error) },
+				);
+			}
 		}
 
 		// Stop existing runner if it's not running
