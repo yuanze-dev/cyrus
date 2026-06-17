@@ -4,6 +4,9 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Security
+- Patched open CLI security advisories and documented the F1 dependency smoke validation. Direct bumps were used where available, with root overrides retained only for vulnerable transitives whose owning packages are already at their current npm latest. ([CYPACK-1334](https://linear.app/ceedar/issue/CYPACK-1334), [#1330](https://github.com/cyrusagents/cyrus/pull/1330))
+
 ## [0.2.65] - 2026-06-11
 
 ### Added
