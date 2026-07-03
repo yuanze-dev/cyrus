@@ -9,6 +9,8 @@
 
 import type {
 	ContentUpdateMessage,
+	FeishuSessionStartPlatformData,
+	FeishuUserPromptPlatformData,
 	GitHubSessionStartPlatformData,
 	GitHubUserPromptPlatformData,
 	GitLabSessionStartPlatformData,
@@ -115,6 +117,13 @@ export function isSlackMessage(message: InternalMessage): boolean {
 	return message.source === "slack";
 }
 
+/**
+ * Type guard to check if message is from Feishu.
+ */
+export function isFeishuMessage(message: InternalMessage): boolean {
+	return message.source === "feishu";
+}
+
 // ============================================================================
 // PLATFORM DATA TYPE GUARDS
 // ============================================================================
@@ -205,4 +214,26 @@ export function hasSlackUserPromptPlatformData(
 	platformData: SlackUserPromptPlatformData;
 } {
 	return message.source === "slack";
+}
+
+/**
+ * Type guard for Feishu platform data in SessionStartMessage.
+ */
+export function hasFeishuSessionStartPlatformData(
+	message: SessionStartMessage,
+): message is SessionStartMessage & {
+	platformData: FeishuSessionStartPlatformData;
+} {
+	return message.source === "feishu";
+}
+
+/**
+ * Type guard for Feishu platform data in UserPromptMessage.
+ */
+export function hasFeishuUserPromptPlatformData(
+	message: UserPromptMessage,
+): message is UserPromptMessage & {
+	platformData: FeishuUserPromptPlatformData;
+} {
+	return message.source === "feishu";
 }

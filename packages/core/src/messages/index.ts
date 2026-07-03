@@ -17,6 +17,7 @@ export type {
 
 // Platform reference types
 export type {
+	FeishuPlatformRef,
 	GitHubPlatformRef,
 	GitLabPlatformRef,
 	LinearPlatformRef,
@@ -25,6 +26,8 @@ export type {
 
 // Type guards
 export {
+	hasFeishuSessionStartPlatformData,
+	hasFeishuUserPromptPlatformData,
 	hasGitHubSessionStartPlatformData,
 	hasGitHubUserPromptPlatformData,
 	hasGitLabSessionStartPlatformData,
@@ -34,6 +37,7 @@ export {
 	hasSlackSessionStartPlatformData,
 	hasSlackUserPromptPlatformData,
 	isContentUpdateMessage,
+	isFeishuMessage,
 	isGitHubMessage,
 	isGitLabMessage,
 	isIssueStateChangeMessage,
@@ -48,6 +52,9 @@ export {
 export type {
 	ContentChanges,
 	ContentUpdateMessage,
+	// Feishu platform data types
+	FeishuSessionStartPlatformData,
+	FeishuUserPromptPlatformData,
 	GitHubSessionStartPlatformData,
 	GitHubUserPromptPlatformData,
 	// GitLab platform data types

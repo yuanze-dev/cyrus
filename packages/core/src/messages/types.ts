@@ -9,6 +9,7 @@
  */
 
 import type {
+	FeishuPlatformRef,
 	GitHubPlatformRef,
 	GitLabPlatformRef,
 	LinearPlatformRef,
@@ -34,7 +35,7 @@ export type MessageAction =
 /**
  * Platform source identifier.
  */
-export type MessageSource = "linear" | "github" | "gitlab" | "slack";
+export type MessageSource = "linear" | "github" | "gitlab" | "slack" | "feishu";
 
 // ============================================================================
 // AUTHOR TYPES
@@ -169,6 +170,20 @@ export interface SlackSessionStartPlatformData {
 }
 
 /**
+ * Feishu-specific platform data for session start.
+ */
+export interface FeishuSessionStartPlatformData {
+	/** Chat where the mention occurred */
+	chat: FeishuPlatformRef["chat"];
+	/** Thread information */
+	thread: FeishuPlatformRef["thread"];
+	/** The message that triggered this session */
+	message: FeishuPlatformRef["message"];
+	/** Feishu tenant key (workspace identifier) */
+	tenantKey?: string;
+}
+
+/**
  * Session start message - initiates a new agent session.
  * Triggered by: Linear delegation, PR mention, thread start, etc.
  */
@@ -187,7 +202,8 @@ export interface SessionStartMessage extends InternalMessageBase {
 		| LinearSessionStartPlatformData
 		| GitHubSessionStartPlatformData
 		| GitLabSessionStartPlatformData
-		| SlackSessionStartPlatformData;
+		| SlackSessionStartPlatformData
+		| FeishuSessionStartPlatformData;
 }
 
 // ============================================================================
@@ -250,6 +266,20 @@ export interface SlackUserPromptPlatformData {
 }
 
 /**
+ * Feishu-specific platform data for user prompt.
+ */
+export interface FeishuUserPromptPlatformData {
+	/** Chat where the message was sent */
+	chat: FeishuPlatformRef["chat"];
+	/** Thread information */
+	thread: FeishuPlatformRef["thread"];
+	/** The message containing the prompt */
+	message: FeishuPlatformRef["message"];
+	/** Feishu tenant key (workspace identifier) */
+	tenantKey?: string;
+}
+
+/**
  * User prompt message - a user message during an active session.
  * Triggered by: Mid-session comments, follow-up questions, etc.
  */
@@ -262,7 +292,8 @@ export interface UserPromptMessage extends InternalMessageBase {
 		| LinearUserPromptPlatformData
 		| GitHubUserPromptPlatformData
 		| GitLabUserPromptPlatformData
-		| SlackUserPromptPlatformData;
+		| SlackUserPromptPlatformData
+		| FeishuUserPromptPlatformData;
 }
 
 // ============================================================================

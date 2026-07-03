@@ -29,6 +29,7 @@ import {
 	type RepositoryConfig,
 } from "cyrus-core";
 import { EdgeWorker } from "cyrus-edge-worker";
+import type { FeishuWebhookEvent } from "cyrus-feishu-event-transport";
 import type { SlackWebhookEvent } from "cyrus-slack-event-transport";
 import { bold, cyan, dim, gray, green, success } from "./src/utils/colors.js";
 
@@ -337,6 +338,53 @@ async function startServer(): Promise<void> {
 			try {
 				await edgeWorker.dispatchChatTestEvent(event);
 				const threadKey = `${channel}:${body.threadTs || ts}`;
+				reply.send({ ok: true, eventId: event.eventId, threadKey });
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				reply.code(500).send({ ok: false, error: message });
+			}
+		});
+
+		// Register F1 test-only HTTP route for dispatching synthetic Feishu chat
+		// events. Exercises the Feishu → ChatSessionHandler → ClaudeRunner code path
+		// without going through Feishu signature verification.
+		fastify.post("/cli/dispatch-feishu-chat", async (request, reply) => {
+			const body =
+				(request.body as {
+					chatId?: string;
+					user?: string;
+					text?: string;
+					rootId?: string;
+					threadId?: string;
+					messageId?: string;
+					mention?: boolean;
+				}) ?? {};
+			const nowMs = `${Date.now()}`;
+			const chatId = body.chatId ?? "oc_F1_CHAT";
+			const messageId = body.messageId ?? `om_f1_${nowMs}`;
+			const isMention = body.mention !== false;
+			const event: FeishuWebhookEvent = {
+				eventType: isMention ? "mention" : "message",
+				eventId: `f1-feishu-${nowMs}`,
+				tenantKey: "f1-test-tenant",
+				payload: {
+					type: isMention ? "mention" : "message",
+					user: body.user ?? "ou_F1_USER",
+					text: body.text ?? "hello",
+					rawContent: JSON.stringify({ text: body.text ?? "hello" }),
+					messageType: "text",
+					messageId,
+					chatId,
+					chatType: "group",
+					rootId: body.rootId,
+					threadId: body.threadId,
+					createTime: nowMs,
+				},
+			};
+			try {
+				await edgeWorker.dispatchFeishuTestEvent(event);
+				const threadRoot = body.rootId || body.threadId || messageId;
+				const threadKey = `${chatId}:${threadRoot}`;
 				reply.send({ ok: true, eventId: event.eventId, threadKey });
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

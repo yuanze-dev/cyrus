@@ -33,6 +33,7 @@
 		"cyrus-config-updater": "workspace:*",
 		"cyrus-core": "workspace:*",
 		"cyrus-cursor-runner": "workspace:*",
+		"cyrus-feishu-event-transport": "workspace:*",
 		"cyrus-gemini-runner": "workspace:*",
 		"cyrus-github-event-transport": "workspace:*",
 		"cyrus-gitlab-event-transport": "workspace:*",

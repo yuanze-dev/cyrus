@@ -190,6 +190,9 @@ export {
 export type {
 	ContentChanges,
 	ContentUpdateMessage,
+	FeishuPlatformRef,
+	FeishuSessionStartPlatformData,
+	FeishuUserPromptPlatformData,
 	GitHubPlatformRef,
 	GitHubSessionStartPlatformData,
 	GitHubUserPromptPlatformData,
@@ -222,6 +225,8 @@ export type {
 	UserPromptMessage,
 } from "./messages/index.js";
 export {
+	hasFeishuSessionStartPlatformData,
+	hasFeishuUserPromptPlatformData,
 	hasGitHubSessionStartPlatformData,
 	hasGitHubUserPromptPlatformData,
 	hasGitLabSessionStartPlatformData,
@@ -231,6 +236,7 @@ export {
 	hasSlackSessionStartPlatformData,
 	hasSlackUserPromptPlatformData,
 	isContentUpdateMessage,
+	isFeishuMessage,
 	isGitHubMessage,
 	isGitLabMessage,
 	isIssueStateChangeMessage,

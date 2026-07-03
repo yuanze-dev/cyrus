@@ -78,6 +78,11 @@ import {
 	WebhookIpValidator,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
+import {
+	FeishuEventTransport,
+	FeishuTokenProvider,
+	type FeishuWebhookEvent,
+} from "cyrus-feishu-event-transport";
 import { GeminiRunner } from "cyrus-gemini-runner";
 import {
 	extractCommentAuthor,
@@ -149,6 +154,7 @@ import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
+import { FeishuChatAdapter } from "./FeishuChatAdapter.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 import { McpConfigService } from "./McpConfigService.js";
@@ -217,6 +223,10 @@ export class EdgeWorker extends EventEmitter {
 	private gitLabEventTransport: GitLabEventTransport | null = null; // GitLab event transport for forwarded GitLab webhooks
 	private slackEventTransport: SlackEventTransport | null = null;
 	private chatSessionHandler: ChatSessionHandler<SlackWebhookEvent> | null =
+		null;
+	private feishuEventTransport: FeishuEventTransport | null = null;
+	private feishuTokenProvider: FeishuTokenProvider | null = null;
+	private feishuChatSessionHandler: ChatSessionHandler<FeishuWebhookEvent> | null =
 		null;
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private gitLabCommentService: GitLabCommentService; // Service for posting comments back to GitLab MRs
@@ -826,12 +836,13 @@ export class EdgeWorker extends EventEmitter {
 			);
 		}
 
-		// 2. Register GitHub and Slack event transports unconditionally
+		// 2. Register GitHub, Slack and Feishu event transports unconditionally
 		// These don't require repositories and must be available during onboarding
 		// for webhook URL verification to succeed.
 		this.registerGitHubEventTransport();
 		this.registerGitLabEventTransport();
 		this.registerSlackEventTransport();
+		this.registerFeishuEventTransport();
 
 		// 3. Create and register ConfigUpdater (both platforms)
 		this.configUpdater = new ConfigUpdater(
@@ -1173,6 +1184,157 @@ export class EdgeWorker extends EventEmitter {
 		this.logger.info(
 			`Slack event transport registered (${slackVerificationMode} mode)`,
 		);
+	}
+
+	/**
+	 * Whether Cyrus should follow plain replies in a Feishu thread it was
+	 * @mentioned in. Enabled by default; force-disabled by the
+	 * `CYRUS_FEISHU_THREAD_FOLLOWING_DISABLED` env kill-switch. When disabled,
+	 * only @mentions are processed.
+	 */
+	private isFeishuThreadFollowingEnabled(): boolean {
+		const envValue = (process.env.CYRUS_FEISHU_THREAD_FOLLOWING_DISABLED ?? "")
+			.toLowerCase()
+			.trim();
+		if (envValue === "true" || envValue === "1" || envValue === "yes") {
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Register the Feishu (Lark) event transport for receiving Feishu webhook
+	 * events. This creates a /feishu-webhook endpoint that handles @mention
+	 * events from Feishu groups and direct messages.
+	 *
+	 * Feishu is self-host only for now (no CYHOST forwarding), so verification is
+	 * always 'direct': the transport answers the url_verification challenge,
+	 * checks the Verification Token, and decrypts the payload when an Encrypt Key
+	 * is configured. Credentials come from env vars (FEISHU_APP_ID,
+	 * FEISHU_APP_SECRET, FEISHU_ENCRYPT_KEY, FEISHU_VERIFICATION_TOKEN).
+	 */
+	private registerFeishuEventTransport(): void {
+		// Live provider reads from the repository map on demand — no snapshot needed
+		const chatRepositoryProvider = new LiveChatRepositoryProvider(
+			this.repositories,
+			() => this.config.linearWorkspaces || {},
+		);
+
+		const routingContext =
+			this.promptBuilder.generateRoutingContextForAllWorkspaces();
+		const cyrusAppBaseUrl = process.env.CYRUS_API_KEY
+			? getCyrusAppUrl()
+			: undefined;
+
+		// Mint a token provider from the Feishu app credentials when present. The
+		// bot's own open_id is resolved in the background so mention detection can
+		// distinguish the bot from other @mentions.
+		const feishuAppId = process.env.FEISHU_APP_ID;
+		const feishuAppSecret = process.env.FEISHU_APP_SECRET;
+		const feishuBaseUrl = process.env.FEISHU_BASE_URL;
+		if (feishuAppId && feishuAppSecret) {
+			this.feishuTokenProvider = new FeishuTokenProvider({
+				appId: feishuAppId,
+				appSecret: feishuAppSecret,
+				baseUrl: feishuBaseUrl,
+			});
+			this.feishuTokenProvider.resolveBotOpenId().catch(() => {
+				// best-effort; mention detection has a group heuristic fallback
+			});
+		} else {
+			this.feishuTokenProvider = null;
+			this.logger.info(
+				"Feishu app credentials (FEISHU_APP_ID/FEISHU_APP_SECRET) not set — Feishu sessions cannot post replies until configured",
+			);
+		}
+
+		const feishuAdapter = new FeishuChatAdapter(
+			chatRepositoryProvider,
+			this.feishuTokenProvider ?? undefined,
+			this.logger,
+			{
+				repositoryRoutingContext: routingContext,
+				cyrusAppBaseUrl,
+				apiBaseUrl: feishuBaseUrl,
+			},
+		);
+
+		if (
+			!chatRepositoryProvider.getDefaultLinearWorkspaceId() ||
+			!chatRepositoryProvider.getDefaultRepository()
+		) {
+			this.logger.warn(
+				"No repositories or workspaces configured — Feishu sessions will not have access to MCP tools (e.g. mcp__linear for creating issues)",
+			);
+		}
+
+		this.feishuChatSessionHandler = new ChatSessionHandler(feishuAdapter, {
+			cyrusHome: this.cyrusHome,
+			chatRepositoryProvider,
+			runnerConfigBuilder: this.runnerConfigBuilder,
+			createRunner: (config) => {
+				const runnerType = this.runnerSelectionService.getDefaultRunner();
+				return this.createRunnerForType(runnerType, {
+					...config,
+					model: this.getDefaultModelForRunner(runnerType),
+					fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
+				});
+			},
+			// Feishu has no per-platform custom MCP config list yet; chat sessions
+			// still load the native servers (Linear, cyrus-tools, cyrus-docs).
+			getPlatformMcpConfigOverrides: () => undefined,
+			resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
+				const plugins = await this.skillsPluginResolver.resolve();
+				const skills = await this.skillsPluginResolver.discoverSkillNames(
+					plugins,
+					{
+						repositoryId: repository?.id,
+						repoPaths: repositoryPaths,
+					},
+				);
+				return { plugins, skills };
+			},
+			onWebhookStart: () => {
+				this.activeWebhookCount++;
+			},
+			onWebhookEnd: () => {
+				this.activeWebhookCount--;
+			},
+			onStateChange: () => this.savePersistedState(),
+			onClaudeError: (error) => this.handleClaudeError(error),
+		});
+
+		const feishuVerificationToken = process.env.FEISHU_VERIFICATION_TOKEN;
+		const feishuEncryptKey = process.env.FEISHU_ENCRYPT_KEY;
+
+		this.feishuEventTransport = new FeishuEventTransport({
+			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
+			verificationMode: "direct",
+			secret: process.env.CYRUS_API_KEY || "",
+			verificationToken: feishuVerificationToken,
+			encryptKey: feishuEncryptKey,
+			isThreadFollowingEnabled: () => this.isFeishuThreadFollowingEnabled(),
+			getBotOpenId: () => this.feishuTokenProvider?.getCachedBotOpenId(),
+		});
+
+		this.feishuEventTransport.on("event", (event: FeishuWebhookEvent) => {
+			this.feishuChatSessionHandler!.handleEvent(event).catch((error) => {
+				this.logger.error(
+					"Failed to handle Feishu webhook",
+					error instanceof Error ? error : new Error(String(error)),
+				);
+			});
+		});
+		this.feishuEventTransport.on("message", (message: InternalMessage) => {
+			this.handleMessage(message);
+		});
+		this.feishuEventTransport.on("error", (error: Error) => {
+			this.handleError(error);
+		});
+
+		this.feishuEventTransport.register();
+
+		this.logger.info("Feishu event transport registered (direct mode)");
 	}
 
 	/**
@@ -2509,7 +2671,10 @@ ${taskSection}`;
 		}
 
 		// Busy if any chat platform runner is actively running
-		if (this.chatSessionHandler?.isAnyRunnerBusy()) {
+		if (
+			this.chatSessionHandler?.isAnyRunnerBusy() ||
+			this.feishuChatSessionHandler?.isAnyRunnerBusy()
+		) {
 			return "busy";
 		}
 
@@ -2529,6 +2694,18 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Test-only: dispatch a synthetic Feishu webhook event through the Feishu
+	 * chat session handler. Used by the F1 test harness to exercise the Feishu →
+	 * ClaudeRunner code path end-to-end without a real Feishu signature.
+	 */
+	async dispatchFeishuTestEvent(event: FeishuWebhookEvent): Promise<void> {
+		if (!this.feishuChatSessionHandler) {
+			throw new Error("feishuChatSessionHandler not initialized");
+		}
+		await this.feishuChatSessionHandler.handleEvent(event);
+	}
+
+	/**
 	 * Public accessor for the shared Fastify-based application server.
 	 * Used by F1 to register test-only routes alongside production webhook routes.
 	 */
@@ -2540,8 +2717,10 @@ ${taskSection}`;
 	 * Test-only: list active chat threads (threadKey → sessionId).
 	 */
 	listChatThreads(): Array<{ threadKey: string; sessionId: string }> {
-		if (!this.chatSessionHandler) return [];
-		return this.chatSessionHandler.listThreads();
+		return [
+			...(this.chatSessionHandler?.listThreads() ?? []),
+			...(this.feishuChatSessionHandler?.listThreads() ?? []),
+		];
 	}
 
 	/**
@@ -2554,8 +2733,9 @@ ${taskSection}`;
 		isRunning: boolean;
 		messageCount: number;
 	} | null {
-		if (!this.chatSessionHandler) return null;
-		const runner = this.chatSessionHandler.getRunnerForThread(threadKey);
+		const runner =
+			this.chatSessionHandler?.getRunnerForThread(threadKey) ??
+			this.feishuChatSessionHandler?.getRunnerForThread(threadKey);
 		if (!runner) return null;
 		const messages = runner.getMessages();
 		const lastAssistant = [...messages]
@@ -2605,6 +2785,9 @@ ${taskSection}`;
 		];
 		if (this.chatSessionHandler) {
 			agentRunners.push(...this.chatSessionHandler.getAllRunners());
+		}
+		if (this.feishuChatSessionHandler) {
+			agentRunners.push(...this.feishuChatSessionHandler.getAllRunners());
 		}
 
 		// Kill all agent processes with null checking
@@ -5811,6 +5994,7 @@ ${taskSection}`;
 		return [
 			...this.agentSessionManager.getAllSessions(),
 			...(this.chatSessionHandler?.getAllChatSessions() ?? []),
+			...(this.feishuChatSessionHandler?.getAllChatSessions() ?? []),
 		];
 	}
 
@@ -5864,7 +6048,9 @@ ${taskSection}`;
 				? "gitlab"
 				: session.id.startsWith("slack-")
 					? "slack"
-					: (session.issueContext?.trackerId ?? "linear");
+					: session.id.startsWith("feishu-")
+						? "feishu"
+						: (session.issueContext?.trackerId ?? "linear");
 
 		// For Linear-source sessions, `session.id` is already the Linear
 		// AgentSession id (they're literally the same UUID — the v3 rename

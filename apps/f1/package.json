@@ -35,6 +35,7 @@
 		"cyrus-claude-runner": "workspace:*",
 		"cyrus-core": "workspace:*",
 		"cyrus-edge-worker": "workspace:*",
+		"cyrus-feishu-event-transport": "workspace:*",
 		"cyrus-slack-event-transport": "workspace:*"
 	},
 	"devDependencies": {

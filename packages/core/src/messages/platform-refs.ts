@@ -324,3 +324,51 @@ export interface SlackPlatformRef {
 		};
 	};
 }
+
+// ============================================================================
+// FEISHU / LARK PLATFORM REFERENCES
+// ============================================================================
+
+/**
+ * Feishu (Lark) platform reference types.
+ *
+ * Mirrors {@link SlackPlatformRef} but keyed by Feishu's identifiers: a chat is
+ * addressed by its `open_chat_id` (oc_…), threads/messages by their
+ * `message_id` (om_…), and users by their `open_id` (ou_…). Feishu has no
+ * per-channel float "ts" like Slack — a message's identity IS its message_id,
+ * and a thread is rooted at the triggering message (or its `root_id`/
+ * `thread_id` when the message is itself a threaded reply).
+ */
+export interface FeishuPlatformRef {
+	/** Chat (group or p2p) data */
+	chat: {
+		/** Chat ID (e.g. "oc_1234...") */
+		id: string;
+		/** Chat type ("group" | "p2p") */
+		type?: string;
+	};
+
+	/** Thread data */
+	thread: {
+		/** Triggering message ID (e.g. "om_1234...") */
+		messageId: string;
+		/** Thread root message ID, when the triggering message is a threaded reply */
+		rootId?: string;
+		/** Feishu thread ID, when the message belongs to a native thread */
+		threadId?: string;
+	};
+
+	/** Message data */
+	message: {
+		/** Message ID (e.g. "om_1234...") */
+		messageId: string;
+		/** Message text (decoded, mentions resolved) */
+		text: string;
+		/** Message author */
+		user: {
+			/** Sender open_id (e.g. "ou_1234...") */
+			id: string;
+			name?: string;
+		};
+	};
+}
