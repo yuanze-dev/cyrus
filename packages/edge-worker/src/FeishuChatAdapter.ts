@@ -49,6 +49,13 @@ export class FeishuChatAdapter
 	private apiBaseUrl: string | undefined;
 	private fullAccess: boolean;
 	private logger: ILogger;
+	/**
+	 * Maps a Feishu messageId to the reaction_id of its "OnIt" (working) receipt
+	 * reaction, so {@link acknowledgeProcessed} can remove it once the turn ends.
+	 * Entries are consumed (deleted) as soon as they're used; a runner that dies
+	 * before completing simply leaves the "OnIt" reaction in place (best-effort).
+	 */
+	private readonly receiptReactionIds = new Map<string, string>();
 
 	constructor(
 		repositoryProvider: ChatRepositoryProvider,
@@ -401,11 +408,18 @@ ${formatted}
 			return;
 		}
 		try {
-			await new FeishuReactionService(this.apiBaseUrl).addReaction({
+			const reactionId = await new FeishuReactionService(
+				this.apiBaseUrl,
+			).addReaction({
 				token,
 				messageId: event.payload.messageId,
 				emojiType: RECEIPT_EMOJI,
 			});
+			// Retain the reaction_id so acknowledgeProcessed can remove the
+			// "OnIt" reaction once the turn is done.
+			if (reactionId) {
+				this.receiptReactionIds.set(event.payload.messageId, reactionId);
+			}
 		} catch (error) {
 			this.logger.warn(
 				`Failed to add Feishu receipt reaction: ${error instanceof Error ? error.message : String(error)}`,
@@ -414,31 +428,51 @@ ${formatted}
 	}
 
 	/**
-	 * Add the "processed" reaction once the agent finished its turn. Runs whether
-	 * or not a reply was posted, so users can tell a silently-skipped message was
-	 * still handled.
+	 * Add the "processed" ("DONE") reaction once the agent finished its turn and
+	 * remove the "OnIt" (working) receipt reaction, so the message ends up marked
+	 * only as done. Runs whether or not a reply was posted, so users can tell a
+	 * silently-skipped message was still handled.
 	 *
-	 * Unlike Slack, this does NOT remove the receipt reaction first: Feishu's
-	 * remove-reaction API requires the receipt reaction_id, and retaining that id
-	 * across the turn would leak (the id is never reclaimed when a runner errors
-	 * before completing). Leaving both reactions ("OnIt" + "DONE") reads cleanly
-	 * as "received, then done" and keeps the adapter stateless. Best-effort.
+	 * Removing the receipt reaction requires the reaction_id captured at receipt
+	 * time (see {@link receiptReactionIds}). If it was never captured — e.g. the
+	 * runner errored before completing, or Feishu returned no id — the "OnIt"
+	 * reaction is simply left in place. Best-effort throughout.
 	 */
 	async acknowledgeProcessed(event: FeishuWebhookEvent): Promise<void> {
 		const token = await this.getToken();
 		if (!token) {
 			return;
 		}
+		const messageId = event.payload.messageId;
+		const reactionService = new FeishuReactionService(this.apiBaseUrl);
 		try {
-			await new FeishuReactionService(this.apiBaseUrl).addReaction({
+			await reactionService.addReaction({
 				token,
-				messageId: event.payload.messageId,
+				messageId,
 				emojiType: PROCESSED_EMOJI,
 			});
 		} catch (error) {
 			this.logger.warn(
 				`Failed to add Feishu processed reaction: ${error instanceof Error ? error.message : String(error)}`,
 			);
+		}
+		// Now that the turn is done, drop the "OnIt" (working) reaction so only
+		// "DONE" remains. Needs the reaction_id captured at receipt time; if it's
+		// missing (runner died early, or Feishu returned none) leave it be.
+		const receiptReactionId = this.receiptReactionIds.get(messageId);
+		if (receiptReactionId) {
+			this.receiptReactionIds.delete(messageId);
+			try {
+				await reactionService.removeReaction({
+					token,
+					messageId,
+					reactionId: receiptReactionId,
+				});
+			} catch (error) {
+				this.logger.warn(
+					`Failed to remove Feishu receipt reaction: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 	}
 

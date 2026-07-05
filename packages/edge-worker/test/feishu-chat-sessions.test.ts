@@ -11,6 +11,8 @@ import { ChatSessionHandler } from "../src/ChatSessionHandler.js";
 import {
 	FEISHU_NO_RESPONSE_SENTINEL,
 	FeishuChatAdapter,
+	PROCESSED_EMOJI,
+	RECEIPT_EMOJI,
 } from "../src/FeishuChatAdapter.js";
 import type { RunnerConfigBuilder } from "../src/RunnerConfigBuilder.js";
 import { TEST_CYRUS_CHAT } from "./test-dirs.js";
@@ -298,6 +300,57 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 			messageId: "om_1",
 			text: "Created Linear issue ENG-42 and assigned it to you.",
 			replyInThread: true,
+		});
+	});
+
+	it("removes the OnIt (working) reaction and adds DONE once the turn ends", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "replyMessage").mockResolvedValue(
+			undefined,
+		);
+		const addReaction = vi
+			.spyOn(FeishuReactionService.prototype, "addReaction")
+			.mockResolvedValue("react_onit");
+		const removeReaction = vi
+			.spyOn(FeishuReactionService.prototype, "removeReaction")
+			.mockResolvedValue(undefined);
+
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const { createRunner, getConfig } = fakeRunner("all done");
+		const handler = buildHandler(adapter, createRunner);
+
+		await handler.handleEvent(mentionEvent());
+
+		// Receipt reaction added, none removed yet.
+		expect(addReaction).toHaveBeenCalledWith({
+			token: "t_test",
+			messageId: "om_1",
+			emojiType: RECEIPT_EMOJI,
+		});
+		expect(removeReaction).not.toHaveBeenCalled();
+
+		// End the turn → DONE reaction added and the OnIt reaction removed.
+		await getConfig().onMessage({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(addReaction).toHaveBeenCalledWith({
+			token: "t_test",
+			messageId: "om_1",
+			emojiType: PROCESSED_EMOJI,
+		});
+		expect(removeReaction).toHaveBeenCalledTimes(1);
+		expect(removeReaction).toHaveBeenCalledWith({
+			token: "t_test",
+			messageId: "om_1",
+			reactionId: "react_onit",
 		});
 	});
 
