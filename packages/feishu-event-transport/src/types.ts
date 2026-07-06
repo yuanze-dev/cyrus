@@ -105,6 +105,12 @@ export interface FeishuEventPayload {
 	type: FeishuEventType;
 	/** Sender open_id (e.g. "ou_...") */
 	user: string;
+	/**
+	 * Sender's resolved display name, when the Contact API could translate
+	 * {@link user}. Populated best-effort before the event is dispatched; absent
+	 * when name resolution is unavailable or failed.
+	 */
+	userName?: string;
 	/** Decoded, mention-processed message text */
 	text: string;
 	/** Raw message content JSON string (as delivered by Feishu) */

@@ -6,6 +6,7 @@ import {
 	FeishuReactionService,
 	type FeishuThreadMessage,
 	type FeishuTokenProvider,
+	type FeishuUserDirectory,
 	type FeishuWebhookEvent,
 	feishuThreadRoot,
 } from "cyrus-feishu-event-transport";
@@ -44,6 +45,7 @@ export class FeishuChatAdapter
 	readonly platformName = "feishu" as const;
 	private repositoryProvider: ChatRepositoryProvider;
 	private tokenProvider: FeishuTokenProvider | undefined;
+	private userDirectory: FeishuUserDirectory | undefined;
 	private repositoryRoutingContext: string;
 	private behavioursPageUrl: string;
 	private apiBaseUrl: string | undefined;
@@ -73,10 +75,18 @@ export class FeishuChatAdapter
 			 * through the ChatSessionHandler → RunnerConfigBuilder path.
 			 */
 			fullAccess?: boolean;
+			/**
+			 * Long-lived directory that translates thread participants' `open_id`s
+			 * into display names for the thread/replied-to context. Best-effort:
+			 * when absent (or when resolution fails) authors fall back to bare
+			 * open_ids.
+			 */
+			userDirectory?: FeishuUserDirectory;
 		},
 	) {
 		this.repositoryProvider = repositoryProvider;
 		this.tokenProvider = tokenProvider;
+		this.userDirectory = options?.userDirectory;
 		this.repositoryRoutingContext =
 			options?.repositoryRoutingContext?.trim() || "";
 		const appBaseUrl = options?.cyrusAppBaseUrl?.trim().replace(/\/+$/, "");
@@ -188,7 +198,11 @@ ${repositoryPaths.map((path) => `- ${path}`).join("\n")}
 		return `You are participating in a Feishu (Lark) thread.
 
 ## Context
-- **Requested by**: ${event.payload.user}
+- **Requested by**: ${
+			event.payload.userName
+				? `${event.payload.userName} (${event.payload.user})`
+				: event.payload.user
+		}
 - **Chat**: ${event.payload.chatId}
 
 ## When to Respond (IMPORTANT)
@@ -264,7 +278,12 @@ Supported:
 					limit: 50,
 				});
 				if (messages.length > 0) {
-					return this.formatThreadContext(messages, botOpenId);
+					const nameMap = await this.resolveAuthorNames(
+						token,
+						messages,
+						botOpenId,
+					);
+					return this.formatThreadContext(messages, botOpenId, nameMap);
 				}
 			} catch (error) {
 				this.logger.warn(
@@ -328,8 +347,9 @@ Supported:
 			(a, b) => Number(a.createTime ?? 0) - Number(b.createTime ?? 0),
 		);
 
+		const nameMap = await this.resolveAuthorNames(token, messages, botOpenId);
 		const formatted = messages
-			.map((message) => this.formatMessageBlock(message, botOpenId))
+			.map((message) => this.formatMessageBlock(message, botOpenId, nameMap))
 			.join("\n");
 		return `<feishu_replied_to_context>
   The user's message is a reply to the following message(s). Treat them as the context the user is referring to.
@@ -495,12 +515,43 @@ ${formatted}
 		}
 	}
 
+	/**
+	 * Batch-resolve the display names of every non-bot sender in a set of
+	 * messages. Best-effort: returns an empty map when no user directory is wired
+	 * up or resolution fails, in which case authors fall back to bare open_ids.
+	 */
+	private async resolveAuthorNames(
+		token: string,
+		messages: FeishuThreadMessage[],
+		botOpenId?: string,
+	): Promise<Map<string, string>> {
+		if (!this.userDirectory) {
+			return new Map();
+		}
+		const openIds = messages
+			.map((msg) => msg.senderId)
+			.filter(
+				(id): id is string => !!id && id !== botOpenId && id.startsWith("ou_"),
+			);
+		if (openIds.length === 0) {
+			return new Map();
+		}
+		try {
+			return await this.userDirectory.resolveNames(token, openIds);
+		} catch {
+			// resolveNames is best-effort and shouldn't throw, but never let name
+			// resolution break thread context.
+			return new Map();
+		}
+	}
+
 	private formatThreadContext(
 		messages: FeishuThreadMessage[],
 		botOpenId?: string,
+		nameMap?: Map<string, string>,
 	): string {
 		const formattedMessages = messages
-			.map((msg) => this.formatMessageBlock(msg, botOpenId))
+			.map((msg) => this.formatMessageBlock(msg, botOpenId, nameMap))
 			.join("\n");
 
 		return `<feishu_thread_context>\n${formattedMessages}\n</feishu_thread_context>`;
@@ -510,10 +561,19 @@ ${formatted}
 	private formatMessageBlock(
 		msg: FeishuThreadMessage,
 		botOpenId?: string,
+		nameMap?: Map<string, string>,
 	): string {
 		const isSelf =
 			(botOpenId && msg.senderId === botOpenId) || msg.senderType === "app";
-		const author = isSelf ? "assistant (you)" : (msg.senderId ?? "unknown");
+		let author: string;
+		if (isSelf) {
+			author = "assistant (you)";
+		} else if (msg.senderId) {
+			const name = nameMap?.get(msg.senderId);
+			author = name ? `${name} (${msg.senderId})` : msg.senderId;
+		} else {
+			author = "unknown";
+		}
 		return `  <message>
     <author>${author}</author>
     <timestamp>${msg.createTime ?? ""}</timestamp>
