@@ -23,6 +23,7 @@ export {
 	FeishuTokenProvider,
 	type FeishuTokenProviderOptions,
 } from "./FeishuTokenProvider.js";
+export { FeishuUserDirectory } from "./FeishuUserDirectory.js";
 export {
 	FeishuWsClient,
 	type FeishuWsClientConfig,

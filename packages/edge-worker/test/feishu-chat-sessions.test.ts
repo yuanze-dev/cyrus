@@ -3,6 +3,7 @@ import {
 	FeishuMessageService,
 	FeishuReactionService,
 	type FeishuTokenProvider,
+	FeishuUserDirectory,
 	type FeishuWebhookEvent,
 } from "cyrus-feishu-event-transport";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -168,6 +169,26 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 		expect(prompt).toContain(FEISHU_NO_RESPONSE_SENTINEL);
 	});
 
+	it("system prompt shows the bare open_id as Requested by when no name resolved", () => {
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const prompt = adapter.buildSystemPrompt(mentionEvent());
+		expect(prompt).toContain("**Requested by**: ou_user");
+	});
+
+	it("system prompt shows 'Name (open_id)' as Requested by when a name is present", () => {
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const prompt = adapter.buildSystemPrompt(
+			mentionEvent({ userName: "Alice Wang" }),
+		);
+		expect(prompt).toContain("**Requested by**: Alice Wang (ou_user)");
+	});
+
 	it("default (non-full-access) system prompt frames the session as read-only", () => {
 		const adapter = new FeishuChatAdapter(
 			createStaticProvider(),
@@ -232,6 +253,66 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 		expect(context).toContain("<feishu_replied_to_context>");
 		expect(context).toContain("Please refactor the auth module");
 		expect(context).toContain("ou_author");
+	});
+
+	it("resolves the replied-to author's open_id to a name when a directory is wired", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "fetchMessage").mockResolvedValue({
+			messageId: "om_A",
+			senderId: "ou_author",
+			senderType: "user",
+			messageType: "text",
+			text: "Please refactor the auth module",
+			createTime: "1700000000000",
+		});
+
+		const userDirectory = new FeishuUserDirectory();
+		vi.spyOn(userDirectory, "resolveNames").mockResolvedValue(
+			new Map([["ou_author", "Grace Hopper"]]),
+		);
+
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+			undefined,
+			{ userDirectory },
+		);
+
+		const context = await adapter.fetchThreadContext(
+			mentionEvent({
+				messageId: "om_B",
+				parentId: "om_A",
+				rootId: "om_A",
+				text: "@Cyrus complete what this message asked",
+			}),
+		);
+
+		expect(context).toContain("<author>Grace Hopper (ou_author)</author>");
+	});
+
+	it("falls back to the bare open_id author when no directory is wired", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "fetchMessage").mockResolvedValue({
+			messageId: "om_A",
+			senderId: "ou_author",
+			senderType: "user",
+			messageType: "text",
+			text: "Please refactor the auth module",
+			createTime: "1700000000000",
+		});
+
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+
+		const context = await adapter.fetchThreadContext(
+			mentionEvent({
+				messageId: "om_B",
+				parentId: "om_A",
+				rootId: "om_A",
+			}),
+		);
+
+		expect(context).toContain("<author>ou_author</author>");
 	});
 
 	it("plain @mention with no thread and no reply target fetches nothing", async () => {

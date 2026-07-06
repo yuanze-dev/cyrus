@@ -81,6 +81,7 @@ import { CursorRunner } from "cyrus-cursor-runner";
 import {
 	FeishuEventTransport,
 	FeishuTokenProvider,
+	FeishuUserDirectory,
 	type FeishuWebhookEvent,
 	FeishuWsClient,
 } from "cyrus-feishu-event-transport";
@@ -228,6 +229,7 @@ export class EdgeWorker extends EventEmitter {
 	private feishuEventTransport: FeishuEventTransport | null = null;
 	private feishuWsClient: FeishuWsClient | null = null;
 	private feishuTokenProvider: FeishuTokenProvider | null = null;
+	private feishuUserDirectory: FeishuUserDirectory | null = null;
 	private feishuChatSessionHandler: ChatSessionHandler<FeishuWebhookEvent> | null =
 		null;
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
@@ -1253,8 +1255,13 @@ export class EdgeWorker extends EventEmitter {
 			this.feishuTokenProvider.resolveBotOpenId().catch(() => {
 				// best-effort; mention detection has a group heuristic fallback
 			});
+			// Long-lived open_id → display name directory, created once so its cache
+			// persists across events. Reused for both the sender (before dispatch)
+			// and thread participants (inside the adapter).
+			this.feishuUserDirectory = new FeishuUserDirectory(feishuBaseUrl);
 		} else {
 			this.feishuTokenProvider = null;
+			this.feishuUserDirectory = null;
 			this.logger.info(
 				"Feishu app credentials (FEISHU_APP_ID/FEISHU_APP_SECRET) not set — Feishu sessions cannot post replies until configured",
 			);
@@ -1269,6 +1276,7 @@ export class EdgeWorker extends EventEmitter {
 				cyrusAppBaseUrl,
 				apiBaseUrl: feishuBaseUrl,
 				fullAccess: feishuFullAccess,
+				userDirectory: this.feishuUserDirectory ?? undefined,
 			},
 		);
 
@@ -1332,7 +1340,7 @@ export class EdgeWorker extends EventEmitter {
 		});
 
 		this.feishuEventTransport.on("event", (event: FeishuWebhookEvent) => {
-			this.feishuChatSessionHandler!.handleEvent(event).catch((error) => {
+			this.handleFeishuEvent(event).catch((error) => {
 				this.logger.error(
 					"Failed to handle Feishu webhook",
 					error instanceof Error ? error : new Error(String(error)),
@@ -1368,7 +1376,7 @@ export class EdgeWorker extends EventEmitter {
 				this.logger,
 			);
 			this.feishuWsClient.on("event", (event: FeishuWebhookEvent) => {
-				this.feishuChatSessionHandler!.handleEvent(event).catch((error) => {
+				this.handleFeishuEvent(event).catch((error) => {
 					this.logger.error(
 						"Failed to handle Feishu long-connection event",
 						error instanceof Error ? error : new Error(String(error)),
@@ -2751,7 +2759,47 @@ ${taskSection}`;
 		if (!this.feishuChatSessionHandler) {
 			throw new Error("feishuChatSessionHandler not initialized");
 		}
-		await this.feishuChatSessionHandler.handleEvent(event);
+		await this.handleFeishuEvent(event);
+	}
+
+	/**
+	 * Enrich a Feishu event with the sender's display name (best-effort) and hand
+	 * it to the chat session handler. Resolving the name here — before dispatch —
+	 * is required because `FeishuChatAdapter.buildSystemPrompt` is synchronous and
+	 * runs before `fetchThreadContext`, so it cannot await the Contact API itself.
+	 */
+	private async handleFeishuEvent(event: FeishuWebhookEvent): Promise<void> {
+		await this.enrichFeishuSenderName(event);
+		await this.feishuChatSessionHandler!.handleEvent(event);
+	}
+
+	/**
+	 * Resolve the sender's `open_id` to a display name and stamp it onto
+	 * `payload.userName`. Strictly best-effort: any failure (no directory, no
+	 * token, missing scope) leaves `userName` unset and the session proceeds with
+	 * the bare open_id.
+	 */
+	private async enrichFeishuSenderName(
+		event: FeishuWebhookEvent,
+	): Promise<void> {
+		const openId = event.payload.user;
+		if (
+			!openId ||
+			!this.feishuUserDirectory ||
+			!this.feishuTokenProvider ||
+			event.payload.userName
+		) {
+			return;
+		}
+		try {
+			const token = await this.feishuTokenProvider.getTenantAccessToken();
+			const name = await this.feishuUserDirectory.resolveName(token, openId);
+			if (name) {
+				event.payload.userName = name;
+			}
+		} catch {
+			// best-effort — never let name resolution block the reply
+		}
 	}
 
 	/**
