@@ -1002,18 +1002,33 @@ export function createCyrusToolsServer(
 			"feishu_read_document",
 			{
 				description:
-					"Read the text content of a Feishu (Lark) document — a docx document or a wiki page. Pass the document URL (e.g. https://<tenant>.feishu.cn/docx/<token> or /wiki/<token>) or its raw token. ALWAYS use this instead of WebFetch for Feishu/Lark document links: Feishu docs require app authentication and WebFetch will fail. The Cyrus bot can only read documents it has been granted access to — if you get a permission error, tell the user to share the document with the Cyrus bot/app and try again. Only docx and wiki pages are supported (sheets/bitable return a note).",
+					"Read the content of a Feishu (Lark) document. Supports: a docx document, a wiki page, and a Bitable/base (多维表格 — returns structured data tables, fields and records). Pass the document URL (e.g. https://<tenant>.feishu.cn/docx/<token>, /wiki/<token>, or /base/<token>?table=<tableId>) or its raw token. ALWAYS use this instead of WebFetch for Feishu/Lark links: Feishu content requires app authentication and WebFetch will fail. For a base, omit tableId to list and read all data tables, or pass tableId (e.g. tblXXXX) to read one; use maxRecords to control how many rows per table are returned. The Cyrus bot can only read content it has been granted access to — if you get a permission error, tell the user to share the document/base with the Cyrus bot/app and try again. (Sheets/电子表格 are not supported yet and return a note.)",
 				inputSchema: {
 					urlOrToken: z
 						.string()
 						.describe(
-							"The Feishu/Lark document URL or token (a docx or wiki page)",
+							"The Feishu/Lark document URL or token (a docx, wiki page, or base)",
+						),
+					tableId: z
+						.string()
+						.optional()
+						.describe(
+							"For a Bitable/base: read only this data table (e.g. 'tblXXXX'). If omitted, all tables are read. Ignored for docx/wiki.",
+						),
+					maxRecords: z
+						.number()
+						.optional()
+						.describe(
+							"For a Bitable/base: max records (rows) to read per table (default 100, max 500).",
 						),
 				},
 			},
-			async ({ urlOrToken }) => {
+			async ({ urlOrToken, tableId, maxRecords }) => {
 				try {
-					const result = await feishuDocs.readDocument(urlOrToken);
+					const result = await feishuDocs.readDocument(urlOrToken, {
+						tableId,
+						maxRecords,
+					});
 					return {
 						content: [
 							{
@@ -1030,7 +1045,7 @@ export function createCyrusToolsServer(
 								text: JSON.stringify({
 									success: false,
 									error: error instanceof Error ? error.message : String(error),
-									hint: "If this is a permission error (code 1254xxx / 'no permission'), ask the user to share the document with the Cyrus bot/app, then retry.",
+									hint: "If this is a permission error (e.g. code 1254xxx / 91402 / 'no permission' / 'FORBIDDEN'), ask the user to share the document or base with the Cyrus bot/app, then retry.",
 								}),
 							},
 						],
