@@ -39,6 +39,46 @@ describe("FeishuMessageService", () => {
 		expect(JSON.parse(payload.content)).toEqual({ text: "done ✅" });
 	});
 
+	it("replyMessage with format 'markdown' posts an interactive card carrying the raw Markdown", async () => {
+		const fetchMock = mockFetchOnce({ code: 0, msg: "success" });
+		vi.stubGlobal("fetch", fetchMock);
+
+		const markdown = "**bold**\n- item\n[link](https://example.com)\n`code`";
+		await new FeishuMessageService().replyMessage({
+			token: "t_abc",
+			messageId: "om_1",
+			text: markdown,
+			format: "markdown",
+		});
+
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe(`${BASE}/im/v1/messages/om_1/reply`);
+		const payload = JSON.parse(init.body);
+		expect(payload.msg_type).toBe("interactive");
+		expect(payload.reply_in_thread).toBe(true);
+		const card = JSON.parse(payload.content);
+		expect(card.schema).toBe("2.0");
+		expect(card.body.elements).toEqual([
+			{ tag: "markdown", content: markdown },
+		]);
+	});
+
+	it("replyMessage defaults to a text body when no format is given", async () => {
+		const fetchMock = mockFetchOnce({ code: 0 });
+		vi.stubGlobal("fetch", fetchMock);
+
+		await new FeishuMessageService().replyMessage({
+			token: "t_abc",
+			messageId: "om_1",
+			text: "**not rendered**",
+		});
+
+		const [, init] = fetchMock.mock.calls[0];
+		const payload = JSON.parse(init.body);
+		expect(payload.msg_type).toBe("text");
+		expect(JSON.parse(payload.content)).toEqual({ text: "**not rendered**" });
+	});
+
 	it("sendMessage posts to /im/v1/messages with receive_id_type", async () => {
 		const fetchMock = mockFetchOnce({ code: 0 });
 		vi.stubGlobal("fetch", fetchMock);

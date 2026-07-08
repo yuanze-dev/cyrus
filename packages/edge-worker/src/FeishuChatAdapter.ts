@@ -261,20 +261,20 @@ ${this.repositoryRoutingContext ? `\n\n${this.repositoryRoutingContext}` : ""}
   - Track execution progress by searching \`mcp__cyrus-tools__linear_get_agent_sessions\` for the active session, then opening it with \`mcp__cyrus-tools__linear_get_agent_session\`.
   - To send mid-flight feedback or corrections to a running child session, use \`mcp__cyrus-tools__linear_agent_give_feedback\` with the session ID returned by \`linear_get_agent_sessions\`. This is the ONLY way to directly prompt a running child agent. \`mcp__linear__save_comment\` does NOT trigger or notify the agent in any way. Always prefer \`linear_agent_give_feedback\` when the child agent is actively working.
 
-## Feishu Message Formatting (CRITICAL)
-Your response is posted as a Feishu (Lark) **plain-text** message. Feishu text messages do NOT render Markdown. You MUST follow these rules:
+## Feishu Message Formatting
+Your response is posted as a Feishu (Lark) interactive card that renders a **subset** of Markdown, so you may use Markdown formatting freely.
 
-NEVER use any of the following — they do not render in Feishu and will appear as broken plain text:
-- NO tables (no | --- | syntax — use plain lines or dashes instead)
-- NO Markdown headers (no # syntax — use a plain line, optionally in ALL CAPS or ending with a colon)
-- NO [text](url) links — write the URL inline as plain text
-- NO **bold** / *italic* / \`inline code\` markup — write plain words
+Supported (use these — they render):
+- **bold**, *italic*, ~~strikethrough~~
+- Ordered and unordered lists ("- item" / "1. item" on their own lines)
+- \`inline code\` and fenced \`\`\` code blocks
+- [text](url) links, and bare URLs (they auto-link)
+- Block quotes ("> quote") and horizontal rules ("---")
+- Emoji
 
-Supported:
-- Plain text with real newlines
-- Simple lists using "- item" or "1. item" on their own lines
-- Bare URLs (they auto-link)
-- Emoji`;
+Avoid (not supported / render poorly in Feishu cards):
+- Tables (no | --- | syntax — use plain lines or lists instead)
+- Markdown headers (# has limited/no rendering — use **bold** or an ALL CAPS line ending with a colon instead)`;
 	}
 
 	async fetchThreadContext(event: FeishuWebhookEvent): Promise<string> {
@@ -430,16 +430,39 @@ ${formatted}
 				return;
 			}
 
-			await new FeishuMessageService(this.apiBaseUrl).replyMessage({
-				token,
-				messageId: event.payload.messageId,
-				text: summary,
-				replyInThread: true,
-			});
-
-			this.logger.info(
-				`Posted Feishu reply to chat ${event.payload.chatId} (message ${event.payload.messageId})`,
-			);
+			const service = new FeishuMessageService(this.apiBaseUrl);
+			// Post the agent's Markdown summary as an interactive card so Feishu
+			// renders it (bold, lists, links, code, ...). If the card send fails
+			// (Feishu code!=0 or network error), fall back to a plain-text reply so
+			// the user still gets an answer — degraded to Markdown source, but never
+			// silent.
+			try {
+				await service.replyMessage({
+					token,
+					messageId: event.payload.messageId,
+					text: summary,
+					replyInThread: true,
+					format: "markdown",
+				});
+				this.logger.info(
+					`Posted Feishu Markdown card reply to chat ${event.payload.chatId} (message ${event.payload.messageId})`,
+				);
+			} catch (cardError) {
+				this.logger.warn(
+					`Feishu Markdown card reply failed, falling back to plain text: ${
+						cardError instanceof Error ? cardError.message : String(cardError)
+					}`,
+				);
+				await service.replyMessage({
+					token,
+					messageId: event.payload.messageId,
+					text: summary,
+					replyInThread: true,
+				});
+				this.logger.info(
+					`Posted Feishu plain-text fallback reply to chat ${event.payload.chatId} (message ${event.payload.messageId})`,
+				);
+			}
 		} catch (error) {
 			this.logger.error(
 				"Failed to post Feishu reply",

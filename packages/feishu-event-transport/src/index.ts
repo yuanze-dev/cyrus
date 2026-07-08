@@ -1,11 +1,15 @@
 export { FeishuEventTransport } from "./FeishuEventTransport.js";
 export type {
 	FeishuFetchThreadParams,
+	FeishuMessageFormat,
 	FeishuReplyMessageParams,
 	FeishuSendMessageParams,
 	FeishuThreadMessage,
 } from "./FeishuMessageService.js";
-export { FeishuMessageService } from "./FeishuMessageService.js";
+export {
+	buildMarkdownCard,
+	FeishuMessageService,
+} from "./FeishuMessageService.js";
 export {
 	buildPromptText,
 	decodeFeishuContent,

@@ -32,6 +32,18 @@ export interface FeishuThreadMessage {
 }
 
 /**
+ * How a message body is rendered in Feishu.
+ *
+ * - `text` (default): plain-text message (`msg_type: "text"`). Feishu does NOT
+ *   render Markdown in text messages.
+ * - `markdown`: an interactive card (`msg_type: "interactive"`, card schema 2.0)
+ *   carrying a single `markdown` element, which renders a Markdown subset
+ *   (bold/italic/strikethrough, lists, links, inline/fenced code, quotes,
+ *   dividers). Use for agent replies that should render Markdown.
+ */
+export type FeishuMessageFormat = "text" | "markdown";
+
+/**
  * Parameters for replying to a Feishu message in its thread.
  */
 export interface FeishuReplyMessageParams {
@@ -39,10 +51,12 @@ export interface FeishuReplyMessageParams {
 	token: string;
 	/** ID of the message to reply to (e.g. "om_...") */
 	messageId: string;
-	/** Reply text */
+	/** Reply text (plain text, or raw Markdown when `format: "markdown"`) */
 	text: string;
 	/** Whether to reply inside the thread (default true) */
 	replyInThread?: boolean;
+	/** How to render the body (default "text"). */
+	format?: FeishuMessageFormat;
 }
 
 /**
@@ -108,6 +122,51 @@ function decodeListMessageText(
 	}
 }
 
+/**
+ * Build a Feishu card (schema 2.0) that renders `markdown` as a single
+ * `markdown` element. Feishu renders a Markdown subset in cards — bold, italic,
+ * strikethrough, ordered/unordered lists, links, inline/fenced code, quotes and
+ * dividers — which is enough to cover the common cases (tables and rich headers
+ * are not supported).
+ *
+ * @see https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-structure
+ */
+export function buildMarkdownCard(markdown: string): Record<string, unknown> {
+	return {
+		schema: "2.0",
+		body: {
+			elements: [
+				{
+					tag: "markdown",
+					content: markdown,
+				},
+			],
+		},
+	};
+}
+
+/**
+ * Build the `{ msg_type, content }` pair for a Feishu message body. Text bodies
+ * become `msg_type: "text"`; markdown bodies become an interactive card. The
+ * `content` is always a JSON string (Feishu requires it stringified), which also
+ * handles Markdown/JSON escaping of the text.
+ */
+function buildMessageBody(
+	text: string,
+	format: FeishuMessageFormat,
+): { msg_type: string; content: string } {
+	if (format === "markdown") {
+		return {
+			msg_type: "interactive",
+			content: JSON.stringify(buildMarkdownCard(text)),
+		};
+	}
+	return {
+		msg_type: "text",
+		content: JSON.stringify({ text }),
+	};
+}
+
 export class FeishuMessageService {
 	private readonly apiBaseUrl: string;
 
@@ -124,12 +183,17 @@ export class FeishuMessageService {
 	 * @see https://open.feishu.cn/document/server-docs/im-v1/message/reply
 	 */
 	async replyMessage(params: FeishuReplyMessageParams): Promise<void> {
-		const { token, messageId, text, replyInThread = true } = params;
+		const {
+			token,
+			messageId,
+			text,
+			replyInThread = true,
+			format = "text",
+		} = params;
 		const url = `${this.apiBaseUrl}/im/v1/messages/${encodeURIComponent(messageId)}/reply`;
 
 		await this.callApi("replyMessage", token, url, {
-			msg_type: "text",
-			content: JSON.stringify({ text }),
+			...buildMessageBody(text, format),
 			reply_in_thread: replyInThread,
 		});
 	}

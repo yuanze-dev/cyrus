@@ -381,6 +381,7 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 			messageId: "om_1",
 			text: "Created Linear issue ENG-42 and assigned it to you.",
 			replyInThread: true,
+			format: "markdown",
 		});
 	});
 
