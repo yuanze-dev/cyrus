@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- Cyrus's Feishu (Lark) replies now pick the message type to match the content: a plain-text answer (like a bare "你好") goes out as an ordinary message bubble instead of being wrapped in a card, and only replies that actually contain Markdown (bold, lists, links, code, quotes, dividers, …) are posted as an interactive card. The card-send failure fallback to plain text is unchanged. ([IN-17](https://linear.app/principle-intl/issue/IN-17))
+- Cyrus's Feishu (Lark) replies now pick the message type to match the content: a plain-text answer (like a bare "你好") goes out as an ordinary message bubble instead of being wrapped in a card, and only replies that actually contain Markdown (bold, lists, links, code, quotes, dividers, …) are posted as an interactive card. The card-send failure fallback to plain text is unchanged. ([IN-17](https://linear.app/principle-intl/issue/IN-17), [#7](https://github.com/yuanze-dev/cyrus/pull/7))
 - Cyrus's replies in Feishu (Lark) threads now render Markdown. Answers are posted as an interactive card, so **bold**, *italic*, ordered/unordered lists, inline and fenced code blocks, links, block quotes and dividers show up styled instead of as raw `**source**` text. If a card ever fails to send, Cyrus automatically falls back to a plain-text reply so you always get an answer (the reason is logged). Internal notices (e.g. the "still working on the previous request" message) stay plain text. ([IN-14](https://linear.app/principle-intl/issue/IN-14))
 
 ### Added
