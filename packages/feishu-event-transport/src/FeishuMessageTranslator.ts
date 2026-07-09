@@ -30,6 +30,8 @@ interface FeishuPostNode {
 	text?: string;
 	href?: string;
 	user_name?: string;
+	/** `image_key` of an inline `img` element (post rich text). */
+	image_key?: string;
 }
 
 /**
@@ -115,6 +117,88 @@ export function decodeFeishuContent(
 
 	const raw = typeof parsed.text === "string" ? parsed.text : "";
 	return stripMention(raw, mentions);
+}
+
+/**
+ * Collect every inline `img` element's `image_key` from a decoded Feishu `post`
+ * (rich text) content object, walking every line/node (handling the
+ * locale-keyed `{ zh_cn: { content } }` shape the same way {@link flattenPost}
+ * does).
+ */
+function collectPostImageKeys(parsed: Record<string, unknown>): string[] {
+	let doc = parsed;
+	if (!Array.isArray((parsed as { content?: unknown }).content)) {
+		const localized = Object.values(parsed).find(
+			(v): v is Record<string, unknown> =>
+				!!v &&
+				typeof v === "object" &&
+				Array.isArray((v as { content?: unknown }).content),
+		);
+		if (localized) doc = localized;
+	}
+
+	const keys: string[] = [];
+	const content = (doc as { content?: unknown }).content;
+	if (Array.isArray(content)) {
+		for (const line of content) {
+			if (!Array.isArray(line)) continue;
+			for (const node of line as FeishuPostNode[]) {
+				if (node && typeof node === "object" && node.tag === "img") {
+					if (typeof node.image_key === "string" && node.image_key) {
+						keys.push(node.image_key);
+					}
+				}
+			}
+		}
+	}
+	return keys;
+}
+
+/**
+ * Decode the `image_key`s carried by a Feishu message `content` JSON string:
+ * the single key of an `image` message, or every inline `img` element's key in a
+ * `post` rich-text message. Other message types (and unparseable content) yield
+ * an empty array.
+ */
+export function decodeFeishuImageKeys(
+	messageType: string,
+	content: string,
+): string[] {
+	if (!content) return [];
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(content) as Record<string, unknown>;
+	} catch {
+		return [];
+	}
+
+	if (messageType === "image") {
+		return typeof parsed.image_key === "string" && parsed.image_key
+			? [parsed.image_key]
+			: [];
+	}
+	if (messageType === "post") {
+		return collectPostImageKeys(parsed);
+	}
+	return [];
+}
+
+/**
+ * The `image_key`s of every image attached to a Feishu payload — a standalone
+ * `image` message, or the images embedded in a `post`. Deduped, preserving
+ * first-seen order. Empty for text-only / imageless messages.
+ */
+export function extractFeishuImageKeys(payload: FeishuEventPayload): string[] {
+	const keys = decodeFeishuImageKeys(payload.messageType, payload.rawContent);
+	const seen = new Set<string>();
+	const deduped: string[] = [];
+	for (const key of keys) {
+		if (!seen.has(key)) {
+			seen.add(key);
+			deduped.push(key);
+		}
+	}
+	return deduped;
 }
 
 /** The prompt text for a Feishu payload (decoded content, mentions resolved). */

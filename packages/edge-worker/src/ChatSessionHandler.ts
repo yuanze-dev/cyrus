@@ -23,11 +23,25 @@ import type { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 /** Platform identifiers supported by the session manager */
 export type ChatPlatformName = "slack" | "linear" | "github" | "feishu";
 
+/**
+ * Sanitize a chat thread key into a filesystem-safe path segment. Shared by the
+ * per-thread workspace ({@link ChatSessionHandler.createWorkspace}) and by
+ * adapters that need a stable per-thread directory (e.g. Feishu image
+ * attachments) so the two never derive divergent names for the same thread.
+ */
+export function sanitizeThreadKeyForPath(threadKey: string): string {
+	return threadKey.replace(/[^a-zA-Z0-9.-]/g, "_");
+}
+
 export interface ChatPlatformAdapter<TEvent> {
 	readonly platformName: ChatPlatformName;
 
-	/** Extract the user's task text from the raw event */
-	extractTaskInstructions(event: TEvent): string;
+	/**
+	 * Extract the user's task text from the raw event. May be async — e.g. the
+	 * Feishu adapter downloads any attached images here and appends references to
+	 * them so the model can read them via the Read tool.
+	 */
+	extractTaskInstructions(event: TEvent): string | Promise<string>;
 
 	/**
 	 * Whether this event is allowed to *start* a brand-new session for its
@@ -200,7 +214,6 @@ export class ChatSessionHandler<TEvent> {
 				`Processing ${this.adapter.platformName} webhook: ${this.adapter.getEventId(event)}`,
 			);
 
-			const taskInstructions = this.adapter.extractTaskInstructions(event);
 			const threadKey = this.adapter.getThreadKey(event);
 
 			// Check if there's already an active session for this thread, matching
@@ -231,6 +244,11 @@ export class ChatSessionHandler<TEvent> {
 					`Failed to acknowledge ${this.adapter.platformName} event: ${err instanceof Error ? err.message : err}`,
 				);
 			});
+
+			// Resolve the prompt text. Deferred until after the non-initiating guard
+			// so ignored events never trigger side effects (e.g. downloading images).
+			const taskInstructions =
+				await this.adapter.extractTaskInstructions(event);
 
 			if (existingSessionId) {
 				// Learn any new keys this event carries (e.g. a thread_id that only
@@ -673,7 +691,7 @@ export class ChatSessionHandler<TEvent> {
 		threadKey: string,
 	): Promise<{ path: string; isGitWorktree: boolean } | null> {
 		try {
-			const sanitizedKey = threadKey.replace(/[^a-zA-Z0-9.-]/g, "_");
+			const sanitizedKey = sanitizeThreadKeyForPath(threadKey);
 			const workspacePath = join(
 				this.deps.cyrusHome,
 				`${this.adapter.platformName}-workspaces`,

@@ -1,8 +1,10 @@
 export { FeishuEventTransport } from "./FeishuEventTransport.js";
 export type {
+	FeishuDownloadResourceParams,
 	FeishuFetchThreadParams,
 	FeishuMessageFormat,
 	FeishuReplyMessageParams,
+	FeishuResource,
 	FeishuSendMessageParams,
 	FeishuThreadMessage,
 } from "./FeishuMessageService.js";
@@ -13,6 +15,8 @@ export {
 export {
 	buildPromptText,
 	decodeFeishuContent,
+	decodeFeishuImageKeys,
+	extractFeishuImageKeys,
 	FeishuMessageTranslator,
 	feishuThreadRoot,
 	feishuThreadRootCandidates,

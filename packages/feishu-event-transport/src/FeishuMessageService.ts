@@ -84,6 +84,29 @@ export interface FeishuFetchMessageParams {
 }
 
 /**
+ * Parameters for downloading an image/file resource attached to a Feishu
+ * message.
+ */
+export interface FeishuDownloadResourceParams {
+	/** Feishu tenant_access_token */
+	token: string;
+	/** ID of the message the resource is attached to (e.g. "om_...") */
+	messageId: string;
+	/** Resource key — for images this is the message's `image_key` */
+	fileKey: string;
+	/** Resource kind (default "image") */
+	type?: "image" | "file";
+}
+
+/** A downloaded Feishu message resource (raw bytes + reported content type). */
+export interface FeishuResource {
+	/** Raw resource bytes */
+	buffer: Buffer;
+	/** `Content-Type` reported by Feishu, when present (e.g. "image/png") */
+	contentType?: string;
+}
+
+/**
  * Parameters for listing messages in a Feishu thread.
  */
 export interface FeishuFetchThreadParams {
@@ -275,6 +298,44 @@ export class FeishuMessageService {
 			text,
 			createTime: item.create_time,
 		};
+	}
+
+	/**
+	 * Download a resource (image/file) attached to a Feishu message, using the
+	 * message-scoped resources endpoint. For images the `fileKey` is the
+	 * message's `image_key`.
+	 *
+	 * Returns the raw bytes plus the reported `Content-Type`. Requires the app to
+	 * hold the `im:resource` (message-resource read) permission; a permission or
+	 * network failure throws so callers can degrade gracefully.
+	 *
+	 * @see https://open.feishu.cn/document/server-docs/im-v1/message/get-2
+	 */
+	async downloadMessageResource(
+		params: FeishuDownloadResourceParams,
+	): Promise<FeishuResource> {
+		const { token, messageId, fileKey, type = "image" } = params;
+		const url = `${this.apiBaseUrl}/im/v1/messages/${encodeURIComponent(
+			messageId,
+		)}/resources/${encodeURIComponent(fileKey)}?type=${encodeURIComponent(type)}`;
+
+		const response = await fetch(url, {
+			method: "GET",
+			headers: { Authorization: `Bearer ${token}` },
+		});
+
+		if (!response.ok) {
+			// Feishu returns a JSON error body (code/msg) on failure even for this
+			// binary endpoint; surface it so callers can log the reason.
+			const errorBody = await response.text();
+			throw new Error(
+				`[FeishuMessageService] Failed to download resource ${fileKey} of message ${messageId}: ${response.status} ${response.statusText} - ${errorBody}`,
+			);
+		}
+
+		const buffer = Buffer.from(await response.arrayBuffer());
+		const contentType = response.headers.get("content-type") ?? undefined;
+		return { buffer, contentType };
 	}
 
 	/**

@@ -202,4 +202,52 @@ describe("FeishuMessageService", () => {
 		expect(url).toContain("container_id_type=thread");
 		expect(url).toContain("container_id=omt_1");
 	});
+
+	it("downloadMessageResource GETs the message resources endpoint and returns bytes + content type", async () => {
+		const bytes = new Uint8Array([137, 80, 78, 71]); // PNG magic
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			headers: {
+				get: (h: string) => (h === "content-type" ? "image/png" : null),
+			},
+			arrayBuffer: async () => bytes.buffer,
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const resource = await new FeishuMessageService().downloadMessageResource({
+			token: "t_img",
+			messageId: "om_1",
+			fileKey: "img_v2_abc",
+		});
+
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe(
+			`${BASE}/im/v1/messages/om_1/resources/img_v2_abc?type=image`,
+		);
+		expect(init.method).toBe("GET");
+		expect(init.headers.Authorization).toBe("Bearer t_img");
+		expect(resource.contentType).toBe("image/png");
+		expect(Array.from(resource.buffer)).toEqual([137, 80, 78, 71]);
+	});
+
+	it("downloadMessageResource throws with the error body on a non-ok response", async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: false,
+			status: 403,
+			statusText: "Forbidden",
+			text: async () =>
+				JSON.stringify({ code: 99991672, msg: "no permission" }),
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(
+			new FeishuMessageService().downloadMessageResource({
+				token: "t",
+				messageId: "om_1",
+				fileKey: "img_x",
+			}),
+		).rejects.toThrow(/no permission/);
+	});
 });

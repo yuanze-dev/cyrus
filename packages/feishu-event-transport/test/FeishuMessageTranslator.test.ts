@@ -6,11 +6,14 @@ import { describe, expect, it } from "vitest";
 import {
 	buildPromptText,
 	decodeFeishuContent,
+	decodeFeishuImageKeys,
+	extractFeishuImageKeys,
 	FeishuMessageTranslator,
 	feishuThreadRoot,
 	feishuThreadRootCandidates,
 	stripMention,
 } from "../src/FeishuMessageTranslator.js";
+import type { FeishuEventPayload } from "../src/types.js";
 import {
 	testMentionWebhookEvent,
 	testMessageWebhookEvent,
@@ -233,5 +236,93 @@ describe("FeishuMessageTranslator", () => {
 			if (!result.success) return;
 			expect(result.message.action).toBe("user_prompt");
 		});
+	});
+});
+
+describe("decodeFeishuImageKeys", () => {
+	it("extracts the image_key from an image message", () => {
+		expect(
+			decodeFeishuImageKeys(
+				"image",
+				JSON.stringify({ image_key: "img_v2_abc" }),
+			),
+		).toEqual(["img_v2_abc"]);
+	});
+
+	it("extracts inline img image_keys from a post message", () => {
+		const post = {
+			title: "look",
+			content: [
+				[
+					{ tag: "text", text: "before " },
+					{ tag: "img", image_key: "img_1" },
+				],
+				[{ tag: "img", image_key: "img_2" }],
+			],
+		};
+		expect(decodeFeishuImageKeys("post", JSON.stringify(post))).toEqual([
+			"img_1",
+			"img_2",
+		]);
+	});
+
+	it("extracts inline img keys from a locale-keyed post message", () => {
+		const post = {
+			zh_cn: {
+				title: "看图",
+				content: [[{ tag: "img", image_key: "img_zh" }]],
+			},
+		};
+		expect(decodeFeishuImageKeys("post", JSON.stringify(post))).toEqual([
+			"img_zh",
+		]);
+	});
+
+	it("returns [] for text messages and unparseable content", () => {
+		expect(
+			decodeFeishuImageKeys("text", JSON.stringify({ text: "hi" })),
+		).toEqual([]);
+		expect(decodeFeishuImageKeys("image", "not json")).toEqual([]);
+		expect(decodeFeishuImageKeys("image", "")).toEqual([]);
+	});
+});
+
+describe("extractFeishuImageKeys", () => {
+	const payload = (
+		messageType: string,
+		rawContent: string,
+	): FeishuEventPayload => ({
+		type: "mention",
+		user: "ou_1",
+		text: "",
+		rawContent,
+		messageType,
+		messageId: "om_1",
+		chatId: "oc_1",
+		chatType: "group",
+		createTime: "0",
+	});
+
+	it("dedupes repeated image keys, preserving first-seen order", () => {
+		const post = {
+			content: [
+				[
+					{ tag: "img", image_key: "img_a" },
+					{ tag: "img", image_key: "img_b" },
+				],
+				[{ tag: "img", image_key: "img_a" }],
+			],
+		};
+		expect(
+			extractFeishuImageKeys(payload("post", JSON.stringify(post))),
+		).toEqual(["img_a", "img_b"]);
+	});
+
+	it("returns [] for a text-only payload", () => {
+		expect(
+			extractFeishuImageKeys(
+				payload("text", JSON.stringify({ text: "hello" })),
+			),
+		).toEqual([]);
 	});
 });
