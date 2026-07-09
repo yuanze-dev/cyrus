@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { IAgentRunner, ILogger } from "cyrus-core";
+import type { IAgentRunner, ILogger, RunnerType } from "cyrus-core";
 import { createLogger } from "cyrus-core";
 import {
 	buildPromptText,
@@ -19,9 +19,12 @@ import { fileTypeFromBuffer } from "file-type";
 import type { ChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import {
 	type ChatPlatformAdapter,
+	type ChatRoutingContext,
+	type ChatTaskInstructions,
 	sanitizeThreadKeyForPath,
 } from "./ChatSessionHandler.js";
 import type { FeishuIssueBindingInput } from "./FeishuIssueNotificationService.js";
+import { stripFeishuRunnerPrefix } from "./FeishuRunnerRouting.js";
 
 /** Full tool name the Feishu agent uses to create Linear issues. */
 const LINEAR_SAVE_ISSUE_TOOL = "mcp__linear__save_issue";
@@ -188,17 +191,29 @@ export class FeishuChatAdapter
 		}
 	}
 
-	async extractTaskInstructions(event: FeishuWebhookEvent): Promise<string> {
+	async extractTaskInstructions(
+		event: FeishuWebhookEvent,
+	): Promise<ChatTaskInstructions> {
 		const text = buildPromptText(event.payload);
+		const prefixResult = stripFeishuRunnerPrefix(text);
 		// Download any images the message carries and describe them so the model
 		// can view them with the Read tool. Best-effort: image failures never block
 		// the text prompt.
 		const imageSection = await this.buildImageSection(event);
+		const strippedText = prefixResult.text;
 
 		if (imageSection) {
-			return text ? `${text}\n\n${imageSection}` : imageSection;
+			return {
+				text: strippedText
+					? `${strippedText}\n\n${imageSection}`
+					: imageSection,
+				requestedRunnerType: prefixResult.runnerType,
+			};
 		}
-		return text || "Ask the user for more context";
+		return {
+			text: strippedText || "Ask the user for more context",
+			requestedRunnerType: prefixResult.runnerType,
+		};
 	}
 
 	/**
@@ -340,6 +355,13 @@ export class FeishuChatAdapter
 
 	getThreadKey(event: FeishuWebhookEvent): string {
 		return `${event.payload.chatId}:${feishuThreadRoot(event.payload)}`;
+	}
+
+	getRoutingContext(event: FeishuWebhookEvent): ChatRoutingContext {
+		return {
+			userId: event.payload.user,
+			chatId: event.payload.chatId,
+		};
 	}
 
 	/**
@@ -889,6 +911,28 @@ ${recent.reply}
 		} catch (error) {
 			this.logger.warn(
 				`Failed to post Feishu busy notice: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	async notifyRunnerLocked(
+		event: FeishuWebhookEvent,
+		runnerType: RunnerType,
+	): Promise<void> {
+		const token = await this.getToken();
+		if (!token) {
+			return;
+		}
+		try {
+			await new FeishuMessageService(this.apiBaseUrl).replyMessage({
+				token,
+				messageId: event.payload.messageId,
+				text: `本话题已锁定 ${runnerType} 引擎，请新开话题再切换引擎。`,
+				replyInThread: true,
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Failed to post Feishu runner-lock notice: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}

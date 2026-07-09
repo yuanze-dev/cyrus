@@ -85,6 +85,7 @@ import {
 	FeishuUserDirectory,
 	type FeishuWebhookEvent,
 	FeishuWsClient,
+	feishuThreadRoot,
 } from "cyrus-feishu-event-transport";
 import { GeminiRunner } from "cyrus-gemini-runner";
 import {
@@ -243,6 +244,7 @@ export class EdgeWorker extends EventEmitter {
 	 * restored) even when Feishu credentials are absent.
 	 */
 	private feishuIssueNotifier: FeishuIssueNotificationService;
+	private currentRunnerTypeByFeishuThread: Map<string, RunnerType> = new Map();
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private gitLabCommentService: GitLabCommentService; // Service for posting comments back to GitLab MRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
@@ -1325,8 +1327,19 @@ export class EdgeWorker extends EventEmitter {
 				cyrusHome: this.cyrusHome,
 				fullAccess: feishuFullAccess,
 				userDirectory: this.feishuUserDirectory ?? undefined,
-				onIssueCreated: (binding) =>
-					this.feishuIssueNotifier.recordIssueBinding(binding),
+				onIssueCreated: (binding) => {
+					this.feishuIssueNotifier.recordIssueBinding(binding);
+					const runnerType =
+						this.currentRunnerTypeByFeishuThread.get(
+							`${binding.chatId}:${binding.rootMessageId}`,
+						) ?? this.runnerSelectionService.getDefaultRunner();
+					this.runnerSelectionService.recordFeishuCreatedIssueRunner({
+						issueIdentifier: binding.issueIdentifier,
+						issueId: binding.issueId,
+						runnerType,
+					});
+					void this.savePersistedState();
+				},
 			},
 		);
 
@@ -1343,13 +1356,28 @@ export class EdgeWorker extends EventEmitter {
 			cyrusHome: this.cyrusHome,
 			chatRepositoryProvider,
 			runnerConfigBuilder: this.runnerConfigBuilder,
-			createRunner: (config) => {
-				const runnerType = this.runnerSelectionService.getDefaultRunner();
+			createRunner: (config, context) => {
+				const runnerType =
+					context?.runnerType ?? this.runnerSelectionService.getDefaultRunner();
 				return this.createRunnerForType(runnerType, {
 					...config,
 					model: this.getDefaultModelForRunner(runnerType),
 					fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
 				});
+			},
+			resolveRunnerType: ({ requestedRunnerType, routingContext, event }) => {
+				const runnerType =
+					this.runnerSelectionService.determineFeishuRunnerSelection({
+						prefixRunner: requestedRunnerType,
+						openId: routingContext?.userId,
+						chatId: routingContext?.chatId,
+					});
+				const feishuEvent = event as FeishuWebhookEvent;
+				this.currentRunnerTypeByFeishuThread.set(
+					`${feishuEvent.payload.chatId}:${feishuThreadRoot(feishuEvent.payload)}`,
+					runnerType,
+				);
+				return runnerType;
 			},
 			// Feishu has no per-platform custom MCP config list yet; chat sessions
 			// still load the native servers (Linear, cyrus-tools, cyrus-docs).
@@ -7244,6 +7272,8 @@ ${input.userComment}
 			childToParentAgentSession,
 			issueRepositoryCache,
 			feishuIssueNotifications: this.feishuIssueNotifier.serialize(),
+			feishuCreatedIssueRunners:
+				this.runnerSelectionService.serializeFeishuCreatedIssueRunners(),
 		};
 	}
 
@@ -7323,6 +7353,17 @@ ${input.userComment}
 				`Restored ${
 					Object.keys(state.feishuIssueNotifications).length
 				} Feishu issue notification binding(s)`,
+			);
+		}
+
+		this.runnerSelectionService.restoreFeishuCreatedIssueRunners(
+			state.feishuCreatedIssueRunners,
+		);
+		if (state.feishuCreatedIssueRunners) {
+			this.logger.debug(
+				`Restored ${
+					Object.keys(state.feishuCreatedIssueRunners).length
+				} Feishu created issue runner mapping(s)`,
 			);
 		}
 	}

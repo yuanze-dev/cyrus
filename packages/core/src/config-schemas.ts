@@ -367,6 +367,18 @@ export const EdgeConfigSchema = z.object({
 	defaultRunner: RunnerTypeSchema.optional(),
 
 	/**
+	 * Feishu open_id → runner mapping for Feishu chat sessions.
+	 * Takes precedence over chat-level mapping when no message prefix is present.
+	 */
+	feishuUserRunners: z.record(z.string(), RunnerTypeSchema).optional(),
+
+	/**
+	 * Feishu chat_id / open_chat_id → runner mapping for Feishu chat sessions.
+	 * Used when no message prefix or user-level mapping is present.
+	 */
+	feishuChatRunners: z.record(z.string(), RunnerTypeSchema).optional(),
+
+	/**
 	 * @deprecated Use claudeDefaultModel instead.
 	 * Legacy field retained for backwards compatibility and migrated on load.
 	 */

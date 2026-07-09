@@ -85,7 +85,7 @@ describe("FeishuChatAdapter.extractTaskInstructions image handling", () => {
 			.mockResolvedValue({ buffer: PNG_BYTES, contentType: "image/png" });
 
 		const adapter = makeAdapter(home);
-		const prompt = await adapter.extractTaskInstructions(
+		const { text: prompt } = await adapter.extractTaskInstructions(
 			imageEvent(JSON.stringify({ image_key: "img_v2_abc" })),
 		);
 
@@ -121,7 +121,7 @@ describe("FeishuChatAdapter.extractTaskInstructions image handling", () => {
 			],
 		};
 		const adapter = makeAdapter(home);
-		const prompt = await adapter.extractTaskInstructions(
+		const { text: prompt } = await adapter.extractTaskInstructions(
 			imageEvent(JSON.stringify(post), "post"),
 		);
 
@@ -137,7 +137,7 @@ describe("FeishuChatAdapter.extractTaskInstructions image handling", () => {
 		).mockRejectedValue(new Error("403 no permission"));
 
 		const adapter = makeAdapter(home);
-		const prompt = await adapter.extractTaskInstructions(
+		const { text: prompt } = await adapter.extractTaskInstructions(
 			imageEvent(JSON.stringify({ image_key: "img_bad" })),
 		);
 
@@ -153,7 +153,7 @@ describe("FeishuChatAdapter.extractTaskInstructions image handling", () => {
 		);
 
 		const adapter = makeAdapter(home, null);
-		const prompt = await adapter.extractTaskInstructions(
+		const { text: prompt } = await adapter.extractTaskInstructions(
 			imageEvent(JSON.stringify({ image_key: "img_x" })),
 		);
 
@@ -164,7 +164,7 @@ describe("FeishuChatAdapter.extractTaskInstructions image handling", () => {
 	it("returns plain text (no image section) for a text-only message", async () => {
 		const home = tempHome();
 		const adapter = makeAdapter(home);
-		const prompt = await adapter.extractTaskInstructions(
+		const { text: prompt } = await adapter.extractTaskInstructions(
 			imageEvent(JSON.stringify({ text: "just text" }), "text"),
 		);
 

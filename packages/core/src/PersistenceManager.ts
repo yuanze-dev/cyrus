@@ -8,6 +8,7 @@ import type {
 	IssueContext,
 	IssueMinimal,
 } from "./CyrusAgentSession.js";
+import type { RunnerType } from "./config-schemas.js";
 import { createLogger, type ILogger } from "./logging/index.js";
 
 /** Current persistence format version */
@@ -107,6 +108,10 @@ export interface SerializableEdgeWorkerState {
 	// Feishu-originated issue → thread bindings, keyed by Linear issue identifier
 	// (e.g. "IN-42"), used to notify the requester's thread when the issue completes.
 	feishuIssueNotifications?: Record<string, SerializedFeishuIssueBinding>;
+	// Feishu-created Linear issue id/identifier → source runner, used to keep
+	// child Linear sessions on the same engine even if the description lacks an
+	// explicit [agent=...] tag.
+	feishuCreatedIssueRunners?: Record<string, RunnerType>;
 }
 
 /**

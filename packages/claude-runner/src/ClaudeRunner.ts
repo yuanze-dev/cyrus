@@ -285,10 +285,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 		this.cyrusHome = config.cyrusHome;
 		this.formatter = new ClaudeMessageFormatter();
 
-		// Create canUseTool callback if onAskUserQuestion is provided
-		if (config.onAskUserQuestion) {
-			this.canUseToolCallback = this.createCanUseToolCallback();
-		}
+		this.canUseToolCallback = this.createCanUseToolCallback();
 
 		// Forward config callbacks to events
 		if (config.onMessage) this.on("message", config.onMessage);
@@ -307,7 +304,41 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	 *
 	 * @see {@link https://platform.claude.com/docs/en/agent-sdk/permissions#handling-the-ask-user-question-tool}
 	 */
-	private createCanUseToolCallback(): CanUseTool {
+	private createCanUseToolCallback(): CanUseTool | undefined {
+		const askUserQuestionCallback = this.config.onAskUserQuestion
+			? this.createAskUserQuestionCanUseToolCallback()
+			: undefined;
+		const configuredCallback = this.config.canUseTool;
+		if (!askUserQuestionCallback && !configuredCallback) {
+			return undefined;
+		}
+		return async (toolName, input, options) => {
+			const firstResult = askUserQuestionCallback
+				? await askUserQuestionCallback(toolName, input, options)
+				: {
+						behavior: "allow" as const,
+						updatedInput: input,
+					};
+			if (!firstResult) {
+				return firstResult;
+			}
+			if (firstResult.behavior !== "allow") {
+				return firstResult;
+			}
+			if (!configuredCallback) {
+				return firstResult;
+			}
+			return configuredCallback(
+				toolName,
+				("updatedInput" in firstResult
+					? firstResult.updatedInput
+					: input) as Record<string, unknown>,
+				options,
+			);
+		};
+	}
+
+	private createAskUserQuestionCanUseToolCallback(): CanUseTool {
 		return async (
 			toolName: string,
 			input: Record<string, unknown>,

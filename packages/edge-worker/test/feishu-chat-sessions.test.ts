@@ -18,7 +18,6 @@ import {
 import type { RunnerConfigBuilder } from "../src/RunnerConfigBuilder.js";
 import { TEST_CYRUS_CHAT } from "./test-dirs.js";
 
-// biome-ignore lint/suspicious/noExplicitAny: test doubles
 type Any = any;
 
 function createMockRunnerConfigBuilder(): RunnerConfigBuilder {
@@ -114,12 +113,14 @@ function fakeRunner(assistantText: string) {
 function buildHandler(
 	adapter: FeishuChatAdapter,
 	createRunner: ReturnType<typeof fakeRunner>["createRunner"],
+	resolveRunnerType = vi.fn(() => "claude" as const),
 ) {
 	return new ChatSessionHandler<FeishuWebhookEvent>(adapter, {
 		cyrusHome: TEST_CYRUS_CHAT,
 		chatRepositoryProvider: createStaticProvider(),
 		runnerConfigBuilder: createMockRunnerConfigBuilder(),
 		createRunner,
+		resolveRunnerType,
 		onWebhookStart: vi.fn(),
 		onWebhookEnd: vi.fn(),
 		onStateChange: vi.fn().mockResolvedValue(undefined),
@@ -383,6 +384,127 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 			text: "Created Linear issue ENG-42 and assigned it to you.",
 			replyInThread: true,
 			format: "text",
+		});
+	});
+
+	it("strips a leading runner prefix and creates the new topic with that runner", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "replyMessage").mockResolvedValue(
+			undefined,
+		);
+		vi.spyOn(FeishuReactionService.prototype, "addReaction").mockResolvedValue(
+			"react_1",
+		);
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const { createRunner, runner } = fakeRunner("ok");
+		const resolveRunnerType = vi.fn(({ requestedRunnerType }) => {
+			return requestedRunnerType ?? "claude";
+		});
+		const handler = buildHandler(adapter, createRunner, resolveRunnerType);
+
+		await handler.handleEvent(
+			mentionEvent({
+				text: "/Codex 帮我做这个",
+				rawContent: JSON.stringify({ text: "@_user_1 /Codex 帮我做这个" }),
+			}),
+		);
+
+		expect(resolveRunnerType).toHaveBeenCalledWith(
+			expect.objectContaining({
+				requestedRunnerType: "codex",
+				routingContext: { userId: "ou_user", chatId: "oc_chat" },
+			}),
+		);
+		expect(createRunner).toHaveBeenCalledWith(expect.any(Object), {
+			runnerType: "codex",
+		});
+		expect(runner.start).toHaveBeenCalledWith("帮我做这个");
+	});
+
+	it("does not treat a non-leading runner prefix as routing", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "replyMessage").mockResolvedValue(
+			undefined,
+		);
+		vi.spyOn(FeishuReactionService.prototype, "addReaction").mockResolvedValue(
+			"react_1",
+		);
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const { createRunner, runner } = fakeRunner("ok");
+		const resolveRunnerType = vi.fn(() => "claude" as const);
+		const handler = buildHandler(adapter, createRunner, resolveRunnerType);
+
+		await handler.handleEvent(
+			mentionEvent({
+				text: "帮我 /codex 做这个",
+				rawContent: JSON.stringify({ text: "@_user_1 帮我 /codex 做这个" }),
+			}),
+		);
+
+		expect(resolveRunnerType).toHaveBeenCalledWith(
+			expect.objectContaining({ requestedRunnerType: undefined }),
+		);
+		expect(runner.start).toHaveBeenCalledWith("帮我 /codex 做这个");
+	});
+
+	it("does not switch runners when an existing topic receives a runner prefix", async () => {
+		const reply = vi
+			.spyOn(FeishuMessageService.prototype, "replyMessage")
+			.mockResolvedValue(undefined);
+		vi.spyOn(FeishuReactionService.prototype, "addReaction").mockResolvedValue(
+			"react_1",
+		);
+		vi.spyOn(
+			FeishuReactionService.prototype,
+			"removeReaction",
+		).mockResolvedValue(undefined);
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const runner = {
+			supportsStreamingInput: true,
+			startStreaming: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+			start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+			stop: vi.fn(),
+			isRunning: vi.fn().mockReturnValue(true),
+			isStreaming: vi.fn().mockReturnValue(true),
+			addStreamMessage: vi.fn(),
+			getMessages: vi.fn().mockReturnValue([]),
+		};
+		const createRunner = vi.fn(() => runner as Any);
+		const handler = buildHandler(
+			adapter,
+			createRunner,
+			vi.fn(() => "claude"),
+		);
+
+		await handler.handleEvent(mentionEvent());
+		await handler.handleEvent(
+			mentionEvent(
+				{
+					type: "message",
+					messageId: "om_2",
+					rootId: "om_1",
+					threadId: "om_1",
+					text: "/codex 改用 codex",
+					rawContent: JSON.stringify({ text: "/codex 改用 codex" }),
+				},
+				"evt_2",
+			),
+		);
+
+		expect(createRunner).toHaveBeenCalledTimes(1);
+		expect(runner.addStreamMessage).not.toHaveBeenCalledWith("改用 codex");
+		expect(reply).toHaveBeenCalledWith({
+			token: "t_test",
+			messageId: "om_2",
+			text: "本话题已锁定 claude 引擎，请新开话题再切换引擎。",
+			replyInThread: true,
 		});
 	});
 

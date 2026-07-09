@@ -2,6 +2,7 @@ import type { EdgeWorkerConfig, RunnerType } from "cyrus-core";
 
 export class RunnerSelectionService {
 	private config: EdgeWorkerConfig;
+	private feishuCreatedIssueRunners: Map<string, RunnerType> = new Map();
 
 	constructor(config: EdgeWorkerConfig) {
 		this.config = config;
@@ -47,6 +48,69 @@ export class RunnerSelectionService {
 		}
 
 		return "claude";
+	}
+
+	public determineFeishuRunnerSelection(input: {
+		prefixRunner?: RunnerType;
+		openId?: string;
+		chatId?: string;
+	}): RunnerType {
+		if (input.prefixRunner) {
+			return input.prefixRunner;
+		}
+		if (input.openId) {
+			const userRunner = this.config.feishuUserRunners?.[input.openId];
+			if (userRunner) {
+				return userRunner;
+			}
+		}
+		if (input.chatId) {
+			const chatRunner = this.config.feishuChatRunners?.[input.chatId];
+			if (chatRunner) {
+				return chatRunner;
+			}
+		}
+		return this.getDefaultRunner();
+	}
+
+	public recordFeishuCreatedIssueRunner(input: {
+		issueIdentifier?: string;
+		issueId?: string;
+		runnerType: RunnerType;
+	}): void {
+		if (input.issueIdentifier) {
+			this.feishuCreatedIssueRunners.set(
+				input.issueIdentifier,
+				input.runnerType,
+			);
+		}
+		if (input.issueId) {
+			this.feishuCreatedIssueRunners.set(input.issueId, input.runnerType);
+		}
+	}
+
+	public restoreFeishuCreatedIssueRunners(
+		state: Record<string, RunnerType> | undefined,
+	): void {
+		this.feishuCreatedIssueRunners = new Map(Object.entries(state ?? {}));
+	}
+
+	public serializeFeishuCreatedIssueRunners(): Record<string, RunnerType> {
+		return Object.fromEntries(this.feishuCreatedIssueRunners.entries());
+	}
+
+	public getFeishuCreatedIssueRunner(input: {
+		issueIdentifier?: string;
+		issueId?: string;
+	}): RunnerType | undefined {
+		return (
+			(input.issueIdentifier
+				? this.feishuCreatedIssueRunners.get(input.issueIdentifier)
+				: undefined) ??
+			(input.issueId
+				? this.feishuCreatedIssueRunners.get(input.issueId)
+				: undefined)
+		);
 	}
 
 	/**
@@ -125,6 +189,10 @@ export class RunnerSelectionService {
 	public determineRunnerSelection(
 		labels: string[],
 		issueDescription?: string,
+		issueContext?: {
+			issueId?: string;
+			issueIdentifier?: string;
+		},
 	): {
 		runnerType: RunnerType;
 		modelOverride?: string;
@@ -286,6 +354,10 @@ export class RunnerSelectionService {
 							? "claude"
 							: undefined;
 		const resolvedAgentFromLabels = resolveAgentFromLabel(normalizedLabels);
+		const runnerFromFeishuCreatedIssue =
+			descriptionAgentTagRaw === undefined
+				? this.getFeishuCreatedIssueRunner(issueContext ?? {})
+				: undefined;
 
 		const modelFromDescription = descriptionModelTagRaw;
 		const modelFromLabels = resolveModelFromLabel(normalizedLabels);
@@ -293,6 +365,7 @@ export class RunnerSelectionService {
 
 		const runnerType: RunnerType =
 			resolvedAgentFromDescription ||
+			runnerFromFeishuCreatedIssue ||
 			resolvedAgentFromLabels ||
 			inferRunnerFromModel(explicitModel) ||
 			this.getDefaultRunner();

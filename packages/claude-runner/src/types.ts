@@ -1,4 +1,5 @@
 import type {
+	CanUseTool,
 	HookCallbackMatcher,
 	HookEvent,
 	JsonSchemaOutputFormat,
@@ -62,6 +63,7 @@ export interface ClaudeRunnerConfig {
 		systemPromptVersion?: string;
 	};
 	hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>; // Claude SDK hooks
+	canUseTool?: CanUseTool; // Optional permission/update callback for tool invocations
 	plugins?: SdkPluginConfig[]; // Plugins providing skills, agents, hooks, and MCP servers
 	/**
 	 * Filter which Skills the main session can invoke. Passed through to the

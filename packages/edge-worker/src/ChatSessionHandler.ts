@@ -8,6 +8,7 @@ import type {
 	IAgentRunner,
 	ILogger,
 	RepositoryConfig,
+	RunnerType,
 } from "cyrus-core";
 import { createLogger } from "cyrus-core";
 import { AgentSessionManager } from "./AgentSessionManager.js";
@@ -33,6 +34,16 @@ export function sanitizeThreadKeyForPath(threadKey: string): string {
 	return threadKey.replace(/[^a-zA-Z0-9.-]/g, "_");
 }
 
+export interface ChatTaskInstructions {
+	text: string;
+	requestedRunnerType?: RunnerType;
+}
+
+export interface ChatRoutingContext {
+	userId?: string;
+	chatId?: string;
+}
+
 export interface ChatPlatformAdapter<TEvent> {
 	readonly platformName: ChatPlatformName;
 
@@ -41,7 +52,9 @@ export interface ChatPlatformAdapter<TEvent> {
 	 * Feishu adapter downloads any attached images here and appends references to
 	 * them so the model can read them via the Read tool.
 	 */
-	extractTaskInstructions(event: TEvent): string | Promise<string>;
+	extractTaskInstructions(
+		event: TEvent,
+	): string | ChatTaskInstructions | Promise<string | ChatTaskInstructions>;
 
 	/**
 	 * Whether this event is allowed to *start* a brand-new session for its
@@ -56,6 +69,9 @@ export interface ChatPlatformAdapter<TEvent> {
 
 	/** Derive a unique thread key for session tracking (e.g., "C123:1704110400.000100") */
 	getThreadKey(event: TEvent): string;
+
+	/** Optional platform identifiers used for runner routing. */
+	getRoutingContext?(event: TEvent): ChatRoutingContext;
 
 	/**
 	 * All thread keys this event could belong to (most stable first), used to
@@ -95,6 +111,9 @@ export interface ChatPlatformAdapter<TEvent> {
 
 	/** Notify the user that a previous request is still processing */
 	notifyBusy(event: TEvent, threadKey: string): Promise<void>;
+
+	/** Notify the user that this thread is locked to its original runner. */
+	notifyRunnerLocked?(event: TEvent, runnerType: RunnerType): Promise<void>;
 }
 
 /**
@@ -107,7 +126,15 @@ export interface ChatSessionHandlerDeps {
 	/** Shared RunnerConfigBuilder for constructing runner configs */
 	runnerConfigBuilder: RunnerConfigBuilder;
 	/** Factory function that creates the appropriate runner based on config.defaultRunner */
-	createRunner: (config: AgentRunnerConfig) => IAgentRunner;
+	createRunner: (
+		config: AgentRunnerConfig,
+		context?: { runnerType?: RunnerType },
+	) => IAgentRunner;
+	resolveRunnerType?: (input: {
+		event: unknown;
+		requestedRunnerType?: RunnerType;
+		routingContext?: ChatRoutingContext;
+	}) => RunnerType;
 	/**
 	 * Live read of the workspace-level custom-integration MCP config paths
 	 * for the chat platform this handler is bound to (e.g.
@@ -247,8 +274,10 @@ export class ChatSessionHandler<TEvent> {
 
 			// Resolve the prompt text. Deferred until after the non-initiating guard
 			// so ignored events never trigger side effects (e.g. downloading images).
-			const taskInstructions =
-				await this.adapter.extractTaskInstructions(event);
+			const extractedInstructions = normalizeChatTaskInstructions(
+				await this.adapter.extractTaskInstructions(event),
+			);
+			const taskInstructions = extractedInstructions.text;
 
 			if (existingSessionId) {
 				// Learn any new keys this event carries (e.g. a thread_id that only
@@ -259,6 +288,18 @@ export class ChatSessionHandler<TEvent> {
 					this.sessionManager.getSession(existingSessionId);
 				const existingRunner =
 					this.sessionManager.getAgentRunner(existingSessionId);
+				if (extractedInstructions.requestedRunnerType) {
+					const lockedRunnerType =
+						getLockedRunnerType(existingSession) ??
+						extractedInstructions.requestedRunnerType;
+					await this.adapter.notifyRunnerLocked?.(event, lockedRunnerType);
+					this.adapter.acknowledgeProcessed?.(event).catch((err: unknown) => {
+						this.logger.warn(
+							`Failed to acknowledge processed ${this.adapter.platformName} event: ${err instanceof Error ? err.message : err}`,
+						);
+					});
+					return;
+				}
 
 				if (existingSession && existingRunner?.isRunning()) {
 					// Session is actively running — inject the follow-up via streaming input
@@ -362,6 +403,11 @@ export class ChatSessionHandler<TEvent> {
 			if (!session.metadata) {
 				session.metadata = {};
 			}
+			const runnerType = this.resolveRunnerType(
+				event,
+				extractedInstructions.requestedRunnerType,
+			);
+			(session.metadata as Record<string, unknown>).runnerType = runnerType;
 
 			// Build the system prompt
 			const systemPrompt = this.adapter.buildSystemPrompt(event);
@@ -372,9 +418,11 @@ export class ChatSessionHandler<TEvent> {
 				sessionId,
 				systemPrompt,
 				sessionId,
+				undefined,
+				runnerType,
 			);
 
-			const runner = this.deps.createRunner(runnerConfig);
+			const runner = this.deps.createRunner(runnerConfig, { runnerType });
 
 			// Store the runner in the session manager
 			this.sessionManager.addAgentRunner(sessionId, runner);
@@ -496,6 +544,7 @@ export class ChatSessionHandler<TEvent> {
 		resumeSessionId: string,
 		taskInstructions: string,
 	): Promise<void> {
+		const runnerType = getLockedRunnerType(existingSession);
 		const systemPrompt = this.adapter.buildSystemPrompt(event);
 
 		const runnerConfig = await this.buildRunnerConfig(
@@ -504,9 +553,10 @@ export class ChatSessionHandler<TEvent> {
 			systemPrompt,
 			sessionId,
 			resumeSessionId,
+			runnerType,
 		);
 
-		const runner = this.deps.createRunner(runnerConfig);
+		const runner = this.deps.createRunner(runnerConfig, { runnerType });
 		this.sessionManager.addAgentRunner(sessionId, runner);
 
 		// Reply posting is driven by `result` messages on the runner's stream
@@ -720,6 +770,7 @@ export class ChatSessionHandler<TEvent> {
 		systemPrompt: string,
 		sessionId: string,
 		resumeSessionId?: string,
+		runnerType?: RunnerType,
 	): Promise<AgentRunnerConfig> {
 		const sessionLogger = this.logger.withContext({
 			sessionId,
@@ -742,6 +793,7 @@ export class ChatSessionHandler<TEvent> {
 			resumeSessionId,
 			cyrusHome: this.deps.cyrusHome,
 			platformName: this.adapter.platformName,
+			runnerType,
 			linearWorkspaceId: provider.getDefaultLinearWorkspaceId(),
 			repository,
 			repositoryPaths,
@@ -755,4 +807,42 @@ export class ChatSessionHandler<TEvent> {
 			onError: (error: Error) => this.deps.onClaudeError(error),
 		});
 	}
+
+	private resolveRunnerType(
+		event: TEvent,
+		requestedRunnerType?: RunnerType,
+	): RunnerType | undefined {
+		return this.deps.resolveRunnerType?.({
+			event,
+			requestedRunnerType,
+			routingContext: this.adapter.getRoutingContext?.(event),
+		});
+	}
+}
+
+function normalizeChatTaskInstructions(
+	value: string | ChatTaskInstructions,
+): ChatTaskInstructions {
+	return typeof value === "string" ? { text: value } : value;
+}
+
+function getLockedRunnerType(
+	session: CyrusAgentSession | undefined,
+): RunnerType | undefined {
+	const metadataRunner = session?.metadata
+		? (session.metadata as Record<string, unknown>).runnerType
+		: undefined;
+	if (
+		metadataRunner === "claude" ||
+		metadataRunner === "gemini" ||
+		metadataRunner === "codex" ||
+		metadataRunner === "cursor"
+	) {
+		return metadataRunner;
+	}
+	if (session?.claudeSessionId) return "claude";
+	if (session?.geminiSessionId) return "gemini";
+	if (session?.codexSessionId) return "codex";
+	if (session?.cursorSessionId) return "cursor";
+	return undefined;
 }

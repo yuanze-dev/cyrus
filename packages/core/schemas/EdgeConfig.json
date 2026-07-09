@@ -543,6 +543,26 @@
 			"type": "string",
 			"enum": ["claude", "gemini", "codex", "cursor"]
 		},
+		"feishuUserRunners": {
+			"type": "object",
+			"propertyNames": {
+				"type": "string"
+			},
+			"additionalProperties": {
+				"type": "string",
+				"enum": ["claude", "gemini", "codex", "cursor"]
+			}
+		},
+		"feishuChatRunners": {
+			"type": "object",
+			"propertyNames": {
+				"type": "string"
+			},
+			"additionalProperties": {
+				"type": "string",
+				"enum": ["claude", "gemini", "codex", "cursor"]
+			}
+		},
 		"defaultModel": {
 			"type": "string"
 		},

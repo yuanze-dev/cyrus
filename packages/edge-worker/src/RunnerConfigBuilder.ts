@@ -18,11 +18,40 @@ import type {
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
+import { injectAgentTagIntoLinearSaveIssueInput } from "./FeishuRunnerRouting.js";
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
 import { appendCloudRuntimeAddendum } from "./prompts/cloudRuntimePromptAddendum.js";
 import { appendFailureModeAddendum } from "./prompts/failureModePromptAddendum.js";
+
+const FEISHU_CODEX_LINEAR_ISSUE_ADDENDUM = `
+
+## Feishu Linear Task Routing
+- When you create a Linear issue from this Feishu conversation with \`mcp__linear__save_issue\`, include \`[agent=codex]\` in the issue description unless the description already contains an explicit \`[agent=...]\` tag.`;
+
+function appendFeishuCodexLinearIssueAddendum(
+	systemPrompt: string,
+	platformName: string,
+	runnerType: RunnerType | undefined,
+): string {
+	if (platformName !== "feishu" || runnerType !== "codex") {
+		return systemPrompt;
+	}
+	return `${systemPrompt}${FEISHU_CODEX_LINEAR_ISSUE_ADDENDUM}`;
+}
+
+function buildFeishuClaudeLinearIssueCanUseTool() {
+	return async (toolName: string, input: Record<string, unknown>) => {
+		if (toolName !== "mcp__linear__save_issue") {
+			return { behavior: "allow" as const, updatedInput: input };
+		}
+		return {
+			behavior: "allow" as const,
+			updatedInput: injectAgentTagIntoLinearSaveIssueInput(input, "claude"),
+		};
+	};
+}
 
 /**
  * Subset of McpConfigService consumed by RunnerConfigBuilder.
@@ -56,6 +85,7 @@ export interface IRunnerSelector {
 	determineRunnerSelection(
 		labels: string[],
 		issueDescription?: string,
+		issueContext?: { issueId?: string; issueIdentifier?: string },
 	): {
 		runnerType: RunnerType;
 		modelOverride?: string;
@@ -114,6 +144,8 @@ export interface ChatRunnerConfigInput {
 	 * as the host user. Only enable for trusted, operator-controlled channels.
 	 */
 	fullAccess?: boolean;
+	/** Runner selected for this chat session, when the platform chooses one. */
+	runnerType?: RunnerType;
 	logger: ILogger;
 	onMessage: (message: SDKMessage) => void | Promise<void>;
 	onError: (error: Error) => void;
@@ -304,8 +336,17 @@ export class RunnerConfigBuilder {
 			cyrusHome: input.cyrusHome,
 			autoMemoryDirectory,
 			appendSystemPrompt: appendCloudRuntimeAddendum(
-				appendBrowserUseAddendum(appendFailureModeAddendum(input.systemPrompt)),
+				appendFeishuCodexLinearIssueAddendum(
+					appendBrowserUseAddendum(
+						appendFailureModeAddendum(input.systemPrompt),
+					),
+					input.platformName,
+					input.runnerType,
+				),
 			),
+			...(input.platformName === "feishu" && input.runnerType === "claude"
+				? { canUseTool: buildFeishuClaudeLinearIssueCanUseTool() }
+				: {}),
 			...(mcpConfig ? { mcpConfig } : {}),
 			...(mcpConfigPath ? { mcpConfigPath } : {}),
 			...(input.resumeSessionId
@@ -351,6 +392,10 @@ export class RunnerConfigBuilder {
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
 			input.labels || [],
 			input.issueDescription,
+			{
+				issueId: input.session.issueContext?.issueId ?? input.session.issueId,
+				issueIdentifier: input.session.issue?.identifier,
+			},
 		);
 		let runnerType = runnerSelection.runnerType;
 		let modelOverride = runnerSelection.modelOverride;

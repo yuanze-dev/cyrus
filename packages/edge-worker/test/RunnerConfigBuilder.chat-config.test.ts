@@ -144,4 +144,56 @@ describe("RunnerConfigBuilder.buildChatConfig", () => {
 		expect(config.plugins).toEqual(plugins);
 		expect(config.skills).toEqual(["agent-browser", "test-user-skills"]);
 	});
+
+	it("adds the Feishu Claude save_issue canUseTool injector", async () => {
+		const builder = makeBuilder();
+
+		const config = builder.buildChatConfig({
+			workspacePath: "/tmp/feishu-workspace",
+			workspaceName: "feishu-thread-x",
+			systemPrompt: "test",
+			sessionId: "sess-1",
+			cyrusHome: "/tmp/cyrus-home-test",
+			platformName: "feishu",
+			runnerType: "claude",
+			logger: silentLogger,
+			onMessage: () => {},
+			onError: () => {},
+		});
+
+		const result = await config.canUseTool?.(
+			"mcp__linear__save_issue",
+			{ title: "Task", description: "Build it" },
+			{ signal: new AbortController().signal, toolUseID: "tool-1" },
+		);
+
+		expect(result).toEqual({
+			behavior: "allow",
+			updatedInput: {
+				title: "Task",
+				description: "[agent=claude]\n\nBuild it",
+			},
+		});
+	});
+
+	it("adds the Feishu Codex Linear issue prompt addendum", () => {
+		const builder = makeBuilder();
+
+		const config = builder.buildChatConfig({
+			workspacePath: "/tmp/feishu-workspace",
+			workspaceName: "feishu-thread-x",
+			systemPrompt: "test",
+			sessionId: "sess-1",
+			cyrusHome: "/tmp/cyrus-home-test",
+			platformName: "feishu",
+			runnerType: "codex",
+			logger: silentLogger,
+			onMessage: () => {},
+			onError: () => {},
+		});
+
+		expect(config.appendSystemPrompt).toContain("[agent=codex]");
+		expect(config.appendSystemPrompt).toContain("mcp__linear__save_issue");
+		expect(config.canUseTool).toBeUndefined();
+	});
 });

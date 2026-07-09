@@ -1,5 +1,6 @@
 import type {
 	BackgroundTaskSummary,
+	CanUseTool,
 	HookCallbackMatcher,
 	HookEvent,
 	McpServerConfig,
@@ -506,6 +507,8 @@ export interface AgentRunnerConfig {
 	};
 	/** Event hooks for customizing agent behavior */
 	hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
+	/** Optional permission/update callback for tool invocations */
+	canUseTool?: CanUseTool;
 	/** Plugins that provide skills, agents, hooks, and MCP servers to the session */
 	plugins?: SdkPluginConfig[];
 	/**
