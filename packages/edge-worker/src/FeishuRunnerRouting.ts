@@ -5,7 +5,11 @@ export interface FeishuRunnerCommandResult {
 	text: string;
 }
 
-const FEISHU_RUNNER_PREFIX_RE = /^\/(claude|codex)(?:\s+|$)/i;
+// Leading whitespace is tolerated so a residual space (e.g. left by a stripped
+// @mention) doesn't defeat the prefix. The bot's own @mention itself is removed
+// upstream in `FeishuChatAdapter.extractTaskInstructions` (by open_id) before we
+// get here, so `/claude`·`/codex` is back at the start of the text.
+const FEISHU_RUNNER_PREFIX_RE = /^\s*\/(claude|codex)(?:\s+|$)/i;
 const AGENT_TAG_RE = /\\?\[agent=[a-zA-Z0-9_.:/-]+\\?\]/i;
 
 export function stripFeishuRunnerPrefix(

@@ -35,6 +35,29 @@ describe("stripMention", () => {
 	it("strips leftover placeholder tokens not covered by mentions", () => {
 		expect(stripMention("@_user_2 hi @_all", [])).toBe("hi");
 	});
+
+	it("drops the bot's own self-mention (by open_id) instead of rendering @name", () => {
+		expect(
+			stripMention(
+				"@_user_1 /codex fix it",
+				[{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Cyrus" }],
+				"ou_bot",
+			),
+		).toBe("/codex fix it");
+	});
+
+	it("still renders a non-bot mention as @name when a botOpenId is supplied", () => {
+		expect(
+			stripMention(
+				"@_user_1 @_user_2 hi",
+				[
+					{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Cyrus" },
+					{ key: "@_user_2", id: { open_id: "ou_alice" }, name: "Alice" },
+				],
+				"ou_bot",
+			),
+		).toBe("@Alice hi");
+	});
 });
 
 describe("decodeFeishuContent", () => {
@@ -80,6 +103,17 @@ describe("decodeFeishuContent", () => {
 	it("returns empty string for unsupported / unparseable content", () => {
 		expect(decodeFeishuContent("image", "{not json")).toBe("");
 		expect(decodeFeishuContent("text", "")).toBe("");
+	});
+
+	it("drops the addressed bot's self-mention when given its open_id", () => {
+		expect(
+			decodeFeishuContent(
+				"text",
+				JSON.stringify({ text: "@_user_1 /claude do work" }),
+				[{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Cyrus" }],
+				"ou_bot",
+			),
+		).toBe("/claude do work");
 	});
 });
 
@@ -177,6 +211,52 @@ describe("buildPromptText", () => {
 				mentions: [{ key: "@_user_1", name: "Cyrus" }],
 			}),
 		).toBe("@Cyrus raw fallback");
+	});
+
+	it("removes the bot self-mention (by open_id) from the cached text when a botOpenId is given", () => {
+		// payload.text was decoded without a botOpenId, so it still carries "@Cyrus".
+		expect(
+			buildPromptText(
+				{
+					...testMentionWebhookEvent.payload,
+					text: "@Cyrus /codex ship it",
+					mentions: [
+						{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Cyrus" },
+					],
+				},
+				"ou_bot",
+			),
+		).toBe("/codex ship it");
+	});
+
+	it("removes a bot self-mention whose display name contains spaces / CJK", () => {
+		expect(
+			buildPromptText(
+				{
+					...testMentionWebhookEvent.payload,
+					text: "@张博 助手 /claude do it",
+					mentions: [
+						{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "张博 助手" },
+					],
+				},
+				"ou_bot",
+			),
+		).toBe("/claude do it");
+	});
+
+	it("leaves the cached text untouched when the mention is not the bot", () => {
+		expect(
+			buildPromptText(
+				{
+					...testMentionWebhookEvent.payload,
+					text: "@Alice please review",
+					mentions: [
+						{ key: "@_user_1", id: { open_id: "ou_alice" }, name: "Alice" },
+					],
+				},
+				"ou_bot",
+			),
+		).toBe("@Alice please review");
 	});
 });
 

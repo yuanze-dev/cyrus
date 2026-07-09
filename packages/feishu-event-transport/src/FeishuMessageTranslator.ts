@@ -38,12 +38,29 @@ interface FeishuPostNode {
  * Strip / resolve Feishu @mention placeholders (`@_user_N`, `@_all`) in a text
  * message. Named mentions are replaced with `@<name>`, unnamed placeholders are
  * removed, and whitespace is collapsed.
+ *
+ * When `botOpenId` is supplied, the bot's OWN self-mention (the `@bot` a user
+ * must prepend to address Cyrus in a group) is dropped entirely rather than
+ * rendered as `@<name>`. This is what a message "addressed to the bot" really
+ * means — the bot's name is not part of the prompt — and it lets a leading
+ * `/claude`·`/codex` runner prefix sit at the start of the text where the
+ * prefix parser expects it (matched by `open_id`, so names with spaces / CJK
+ * are handled robustly).
  */
-export function stripMention(text: string, mentions?: FeishuMention[]): string {
+export function stripMention(
+	text: string,
+	mentions?: FeishuMention[],
+	botOpenId?: string,
+): string {
 	let out = text || "";
 	for (const mention of mentions ?? []) {
 		if (!mention.key) continue;
-		const replacement = mention.name ? `@${mention.name}` : "";
+		const isBotSelfMention = !!botOpenId && mention.id?.open_id === botOpenId;
+		const replacement = isBotSelfMention
+			? ""
+			: mention.name
+				? `@${mention.name}`
+				: "";
 		out = out.split(mention.key).join(replacement);
 	}
 	// Remove any leftover placeholder tokens not covered by the mentions array.
@@ -102,6 +119,7 @@ export function decodeFeishuContent(
 	messageType: string,
 	content: string,
 	mentions?: FeishuMention[],
+	botOpenId?: string,
 ): string {
 	if (!content) return "";
 	let parsed: Record<string, unknown>;
@@ -116,7 +134,7 @@ export function decodeFeishuContent(
 	}
 
 	const raw = typeof parsed.text === "string" ? parsed.text : "";
-	return stripMention(raw, mentions);
+	return stripMention(raw, mentions, botOpenId);
 }
 
 /**
@@ -201,13 +219,56 @@ export function extractFeishuImageKeys(payload: FeishuEventPayload): string[] {
 	return deduped;
 }
 
-/** The prompt text for a Feishu payload (decoded content, mentions resolved). */
-export function buildPromptText(payload: FeishuEventPayload): string {
-	if (payload.text) return payload.text;
+/**
+ * Remove the bot's OWN rendered self-mention (`@<name>`) from already-decoded
+ * text. The pre-decoded {@link FeishuEventPayload.text} was produced without a
+ * `botOpenId`, so a self-mention still shows up as `@<name>`; this strips it
+ * (matched by `open_id`, so a display name with spaces / CJK is handled) and
+ * re-collapses whitespace, leaving a leading `/claude`·`/codex` prefix at the
+ * start of the string. No-op when no `botOpenId` or no matching named mention.
+ */
+function stripBotSelfMentionFromText(
+	text: string,
+	mentions: FeishuMention[] | undefined,
+	botOpenId: string | undefined,
+): string {
+	if (!botOpenId || !text) return text;
+	let out = text;
+	for (const mention of mentions ?? []) {
+		if (mention.id?.open_id === botOpenId && mention.name) {
+			out = out.split(`@${mention.name}`).join("");
+		}
+	}
+	return out
+		.replace(/[ \t]+/g, " ")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+/**
+ * The prompt text for a Feishu payload (decoded content, mentions resolved).
+ *
+ * When `botOpenId` is supplied, the bot's own self-mention (the `@bot` a user
+ * must prepend to address Cyrus in a group) is removed so it does not appear in
+ * the prompt and so a leading `/claude`·`/codex` runner prefix sits at the start
+ * of the text where the prefix parser expects it (IN-39).
+ */
+export function buildPromptText(
+	payload: FeishuEventPayload,
+	botOpenId?: string,
+): string {
+	if (payload.text) {
+		return stripBotSelfMentionFromText(
+			payload.text,
+			payload.mentions,
+			botOpenId,
+		);
+	}
 	return decodeFeishuContent(
 		payload.messageType,
 		payload.rawContent,
 		payload.mentions,
+		botOpenId,
 	);
 }
 

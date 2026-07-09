@@ -22,6 +22,18 @@ describe("Feishu runner routing helpers", () => {
 		expect(stripFeishuRunnerPrefix("帮我 /codex 做")).toEqual({
 			text: "帮我 /codex 做",
 		});
+		// A residual @mention (not just whitespace) still blocks the prefix — the
+		// self-mention must be stripped upstream before this parser sees the text.
+		expect(stripFeishuRunnerPrefix("@Cyrus /codex 做")).toEqual({
+			text: "@Cyrus /codex 做",
+		});
+	});
+
+	it("tolerates leading whitespace before the prefix", () => {
+		expect(stripFeishuRunnerPrefix("  /codex 帮我做")).toEqual({
+			runnerType: "codex",
+			text: "帮我做",
+		});
 	});
 
 	it("injects a half-width agent tag only when missing", () => {
