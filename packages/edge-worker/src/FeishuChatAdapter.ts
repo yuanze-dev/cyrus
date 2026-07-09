@@ -10,6 +10,7 @@ import {
 	type FeishuUserDirectory,
 	type FeishuWebhookEvent,
 	feishuThreadRoot,
+	feishuThreadRootCandidates,
 } from "cyrus-feishu-event-transport";
 import type { ChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import type { ChatPlatformAdapter } from "./ChatSessionHandler.js";
@@ -36,6 +37,14 @@ export const FEISHU_NO_RESPONSE_SENTINEL = "<<NO_RESPONSE>>";
  * listening can be turned off.
  */
 export const BEHAVIOURS_PAGE_ROUTE = "/settings/behaviours";
+
+/**
+ * How long a chat's last agent turn stays eligible to be injected as fallback
+ * context into a *new* session in the same chat. Bounds the "answer landed in a
+ * brand-new session" recovery (see {@link FeishuChatAdapter.recentChatTurns}) so
+ * a stale, unrelated turn from hours ago is never dredged up.
+ */
+export const RECENT_CHAT_CONTEXT_WINDOW_MS = 30 * 60 * 1000;
 
 /** Feishu reaction added when a message is received and queued for processing. */
 export const RECEIPT_EMOJI = "OnIt";
@@ -73,6 +82,19 @@ export class FeishuChatAdapter
 	 * before completing simply leaves the "OnIt" reaction in place (best-effort).
 	 */
 	private readonly receiptReactionIds = new Map<string, string>();
+	/**
+	 * Per-chat memory of the agent's most recent turn (its reply text + which
+	 * thread it belonged to). When a fresh session is created in a chat where the
+	 * agent was just active in a *different* thread — the "追问另起新会话" failure
+	 * mode where a user's answer lands in a brand-new, zero-history session — this
+	 * lets {@link fetchThreadContext} inject that recent reply so the agent still
+	 * sees the question it just asked, instead of claiming it has no context.
+	 * Best-effort and time-bounded ({@link RECENT_CHAT_CONTEXT_WINDOW_MS}).
+	 */
+	private readonly recentChatTurns = new Map<
+		string,
+		{ threadKey: string; reply: string; at: number }
+	>();
 
 	constructor(
 		repositoryProvider: ChatRepositoryProvider,
@@ -154,6 +176,21 @@ export class FeishuChatAdapter
 
 	getThreadKey(event: FeishuWebhookEvent): string {
 		return `${event.payload.chatId}:${feishuThreadRoot(event.payload)}`;
+	}
+
+	/**
+	 * Every thread key this event could belong to — `chatId:threadId`,
+	 * `chatId:rootId`, `chatId:messageId` — most stable first. The head equals
+	 * {@link getThreadKey}; the rest let ChatSessionHandler reconcile a
+	 * conversation whose canonical key shifts across turns (a plain @mention
+	 * keyed on `messageId`, then in-topic follow-ups keyed on `thread_id`) back
+	 * to the one session, instead of spawning a second, zero-history one.
+	 */
+	getThreadAliasKeys(event: FeishuWebhookEvent): string[] {
+		const { chatId } = event.payload;
+		return feishuThreadRootCandidates(event.payload).map(
+			(candidate) => `${chatId}:${candidate}`,
+		);
 	}
 
 	getEventId(event: FeishuWebhookEvent): string {
@@ -279,6 +316,21 @@ Avoid (not supported / render poorly in Feishu cards):
 	}
 
 	async fetchThreadContext(event: FeishuWebhookEvent): Promise<string> {
+		// Prefer the real thread / replied-to linkage. Only when that yields
+		// nothing — the conversation split into a brand-new session with no thread
+		// or reply linkage — fall back to the chat's most recent agent turn so the
+		// agent still sees the question it just asked (AC: no "this is a new
+		// session, I lost your context" replies).
+		const linked = await this.fetchLinkedThreadContext(event);
+		if (linked) {
+			return linked;
+		}
+		return this.fetchRecentChatFallbackContext(event);
+	}
+
+	private async fetchLinkedThreadContext(
+		event: FeishuWebhookEvent,
+	): Promise<string> {
 		const { payload } = event;
 		const token = await this.getToken();
 		if (!token) {
@@ -380,6 +432,54 @@ ${formatted}
 </feishu_replied_to_context>`;
 	}
 
+	/**
+	 * Fallback context for a new session: the agent's most recent reply in this
+	 * SAME chat but a DIFFERENT thread, within {@link RECENT_CHAT_CONTEXT_WINDOW_MS}.
+	 * Recovers the "追问另起新会话" failure mode — a user's answer landing in a
+	 * fresh, zero-history session — by handing the agent back the message it just
+	 * posted (typically the very question being answered). Returns "" when there
+	 * is no eligible recent turn.
+	 */
+	private fetchRecentChatFallbackContext(event: FeishuWebhookEvent): string {
+		const { chatId } = event.payload;
+		const recent = this.recentChatTurns.get(chatId);
+		if (!recent) {
+			return "";
+		}
+		// Same thread ⇒ the linked-context path already covers it (or it was
+		// deliberately empty); only bridge across a split into a new thread.
+		if (recent.threadKey === this.getThreadKey(event)) {
+			return "";
+		}
+		if (Date.now() - recent.at > RECENT_CHAT_CONTEXT_WINDOW_MS) {
+			this.recentChatTurns.delete(chatId);
+			return "";
+		}
+		return `<feishu_recent_chat_context>
+  A new conversation was started, but you were just active in this same chat moments ago (in a different thread). Your most recent message there was:
+  <your_last_message>
+${recent.reply}
+  </your_last_message>
+  The user may be replying to it — for example answering a question you just asked. Treat it as context and do NOT claim you have lost the previous conversation.
+</feishu_recent_chat_context>`;
+	}
+
+	/**
+	 * Remember the agent's reply as this chat's most recent turn, so a later
+	 * session that splits off into a new thread can recover it via
+	 * {@link fetchRecentChatFallbackContext}. Best-effort — no-op for empty text.
+	 */
+	private recordChatTurn(event: FeishuWebhookEvent, reply: string): void {
+		if (!reply) {
+			return;
+		}
+		this.recentChatTurns.set(event.payload.chatId, {
+			threadKey: this.getThreadKey(event),
+			reply,
+			at: Date.now(),
+		});
+	}
+
 	async postReply(
 		event: FeishuWebhookEvent,
 		runner: IAgentRunner,
@@ -422,6 +522,10 @@ ${formatted}
 				);
 				return;
 			}
+
+			// Remember this turn so a later session that splits into a new thread in
+			// the same chat can recover it as fallback context.
+			this.recordChatTurn(event, summary);
 
 			const token = await this.getToken();
 			if (!token) {

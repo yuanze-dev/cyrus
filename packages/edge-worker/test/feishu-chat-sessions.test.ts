@@ -562,13 +562,14 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 		const handler = buildHandler(adapter, createRunner);
 
 		// 1) @mention that starts (or is posted at the head of) a topic: it carries
-		//    a thread_id but NO root_id — it IS the topic root.
+		//    a thread_id but NO root_id. thread_id is the stable topic identity, so
+		//    the session keys on it.
 		await handler.handleEvent(
 			mentionEvent({ messageId: "om_root", threadId: "omt_x" }, "evt_root"),
 		);
 		expect(createRunner).toHaveBeenCalledTimes(1);
 		expect(handler.listThreads()).toEqual([
-			{ threadKey: "oc_chat:om_root", sessionId: "feishu-evt_root" },
+			{ threadKey: "oc_chat:omt_x", sessionId: "feishu-evt_root" },
 		]);
 
 		// 2) In-topic follow-up reply: thread_id set AND root_id = the topic root's
@@ -590,5 +591,167 @@ describe("FeishuChatAdapter integration with ChatSessionHandler", () => {
 		expect(createRunner).toHaveBeenCalledTimes(1);
 		expect(handler.listThreads()).toHaveLength(1);
 		expect(runner.addStreamMessage).toHaveBeenCalledWith("and add tests too");
+	});
+
+	it("reconciles a plain @mention (no thread_id) with its later in-topic follow-ups", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "replyMessage").mockResolvedValue(
+			undefined,
+		);
+		vi.spyOn(FeishuReactionService.prototype, "addReaction").mockResolvedValue(
+			"react_1",
+		);
+
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const runner = {
+			supportsStreamingInput: true,
+			startStreaming: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+			start: vi.fn().mockResolvedValue({ sessionId: "session-1" }),
+			stop: vi.fn(),
+			isRunning: vi.fn().mockReturnValue(true),
+			isStreaming: vi.fn().mockReturnValue(true),
+			addStreamMessage: vi.fn(),
+			getMessages: vi.fn().mockReturnValue([]),
+		};
+		const createRunner = vi.fn(() => runner as Any);
+		const handler = buildHandler(adapter, createRunner);
+
+		// 1) Fresh @mention in a plain group: no thread_id yet (the topic is only
+		//    born once Cyrus replies_in_thread). Keys on its own message id.
+		await handler.handleEvent(
+			mentionEvent({ messageId: "om_root" }, "evt_root"),
+		);
+		expect(createRunner).toHaveBeenCalledTimes(1);
+		expect(handler.listThreads()).toEqual([
+			{ threadKey: "oc_chat:om_root", sessionId: "feishu-evt_root" },
+		]);
+
+		// 2) In-topic follow-up: now a thread_id exists AND root_id points back at
+		//    the original @mention. Its canonical key (thread_id) differs from the
+		//    session's, but the root_id alias reconciles it to the SAME session.
+		const followUp = mentionEvent(
+			{
+				type: "message",
+				messageId: "om_reply1",
+				rootId: "om_root",
+				threadId: "omt_new",
+				text: "here are my answers",
+			},
+			"evt_reply1",
+		);
+		followUp.eventType = "message";
+		await handler.handleEvent(followUp);
+
+		expect(createRunner).toHaveBeenCalledTimes(1);
+		expect(handler.listThreads()).toHaveLength(1);
+		expect(runner.addStreamMessage).toHaveBeenLastCalledWith(
+			"here are my answers",
+		);
+
+		// 3) A further follow-up carrying ONLY the thread_id (root_id dropped) must
+		//    still resolve — the thread_id alias was learned on the previous turn.
+		const followUp2 = mentionEvent(
+			{
+				type: "message",
+				messageId: "om_reply2",
+				threadId: "omt_new",
+				text: "and one more thing",
+			},
+			"evt_reply2",
+		);
+		followUp2.eventType = "message";
+		await handler.handleEvent(followUp2);
+
+		expect(createRunner).toHaveBeenCalledTimes(1);
+		expect(handler.listThreads()).toHaveLength(1);
+		expect(runner.addStreamMessage).toHaveBeenLastCalledWith(
+			"and one more thing",
+		);
+	});
+
+	it("injects the chat's recent turn when an answer lands in a brand-new session", async () => {
+		vi.spyOn(FeishuMessageService.prototype, "replyMessage").mockResolvedValue(
+			undefined,
+		);
+		// No thread/reply linkage to resolve → the fallback path is the only source.
+		const fetchThread = vi
+			.spyOn(FeishuMessageService.prototype, "fetchThreadMessages")
+			.mockResolvedValue([]);
+
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		const { createRunner, getConfig } = fakeRunner(
+			"Before I proceed, please confirm: 1) X 2) Y 3) Z",
+		);
+		const handler = buildHandler(adapter, createRunner);
+
+		// Session A asks the three questions; its reply is recorded for the chat.
+		await handler.handleEvent(
+			mentionEvent({ messageId: "om_q", threadId: "omt_q" }, "evt_q"),
+		);
+		await getConfig().onMessage({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+
+		// The user's answer lands as a brand-new @mention in a DIFFERENT thread of
+		// the same chat (the split failure mode). fetchThreadContext must surface
+		// the questions from the recent chat turn instead of nothing.
+		const answerEvent = mentionEvent(
+			{ messageId: "om_a", threadId: "omt_a", text: "1) yes 2) no 3) later" },
+			"evt_a",
+		);
+		const context = await adapter.fetchThreadContext(answerEvent);
+
+		expect(fetchThread).toHaveBeenCalled();
+		expect(context).toContain("<feishu_recent_chat_context>");
+		expect(context).toContain(
+			"Before I proceed, please confirm: 1) X 2) Y 3) Z",
+		);
+	});
+
+	it("does not inject recent-chat fallback for a follow-up in the same thread", async () => {
+		const adapter = new FeishuChatAdapter(
+			createStaticProvider(),
+			createMockTokenProvider(),
+		);
+		vi.spyOn(
+			FeishuMessageService.prototype,
+			"fetchThreadMessages",
+		).mockResolvedValue([]);
+		vi.spyOn(FeishuMessageService.prototype, "replyMessage").mockResolvedValue(
+			undefined,
+		);
+		const { createRunner, getConfig } = fakeRunner("a question?");
+		const handler = buildHandler(adapter, createRunner);
+
+		await handler.handleEvent(
+			mentionEvent({ messageId: "om_q", threadId: "omt_same" }, "evt_q"),
+		);
+		await getConfig().onMessage({
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			result: "done",
+			session_id: "session-1",
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+
+		// Same thread as the recorded turn → the linked-thread path owns it; no
+		// cross-thread fallback should fire (avoids duplicating context).
+		const sameThread = mentionEvent(
+			{ messageId: "om_q2", threadId: "omt_same" },
+			"evt_q2",
+		);
+		const context = await adapter.fetchThreadContext(sameThread);
+		expect(context).not.toContain("<feishu_recent_chat_context>");
 	});
 });

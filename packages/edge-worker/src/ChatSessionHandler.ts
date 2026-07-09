@@ -43,6 +43,17 @@ export interface ChatPlatformAdapter<TEvent> {
 	/** Derive a unique thread key for session tracking (e.g., "C123:1704110400.000100") */
 	getThreadKey(event: TEvent): string;
 
+	/**
+	 * All thread keys this event could belong to (most stable first), used to
+	 * reconcile a conversation whose canonical {@link getThreadKey} shifts
+	 * between turns back to a single session. The first entry MUST equal
+	 * `getThreadKey(event)`; the rest are treated as lookup aliases.
+	 *
+	 * Optional — when omitted, only `getThreadKey` identifies the thread (the
+	 * behaviour for platforms with a single stable thread identity, e.g. Slack).
+	 */
+	getThreadAliasKeys?(event: TEvent): string[];
+
 	/** Get the unique event ID */
 	getEventId(event: TEvent): string;
 
@@ -121,7 +132,16 @@ export interface ChatSessionHandlerDeps {
 export class ChatSessionHandler<TEvent> {
 	private adapter: ChatPlatformAdapter<TEvent>;
 	private sessionManager: AgentSessionManager;
+	// Canonical thread key → sessionId. One entry per session (the key it was
+	// created under), so `listThreads()`/`getRunnerForThread()` stay 1:1.
 	private threadSessions: Map<string, string> = new Map();
+	// Secondary thread keys (see ChatPlatformAdapter.getThreadAliasKeys) →
+	// sessionId. A conversation whose canonical key shifts between turns (e.g. a
+	// Feishu @mention keyed on messageId, then in-topic follow-ups keyed on
+	// thread_id) resolves through here to the ORIGINAL session instead of
+	// spawning a second, zero-history one. Kept separate from threadSessions so
+	// the canonical map remains one entry per session.
+	private threadAliases: Map<string, string> = new Map();
 	private deps: ChatSessionHandlerDeps;
 	private logger: ILogger;
 	// Queue of events awaiting a reply, keyed by sessionId. Each entry is
@@ -144,9 +164,11 @@ export class ChatSessionHandler<TEvent> {
 	private lastReplyEvent: Map<string, TEvent> = new Map();
 	// Follow-up events that arrived while a turn was running and could not be
 	// streamed into it (e.g. the exec Codex backend, which has no mid-turn input
-	// channel). Keyed by threadKey. Drained when the running turn completes and
-	// re-dispatched as a fresh turn, so a follow-up is never silently dropped —
-	// honoring the "I'll pick up your new message once I'm done" promise.
+	// channel). Keyed by sessionId (NOT threadKey — a session may be addressed by
+	// several alias keys, so keying by the stable sessionId avoids queue/drain
+	// mismatches). Drained when the running turn completes and re-dispatched as a
+	// fresh turn, so a follow-up is never silently dropped — honoring the "I'll
+	// pick up your new message once I'm done" promise.
 	private pendingFollowups: Map<string, TEvent[]> = new Map();
 
 	constructor(
@@ -181,8 +203,10 @@ export class ChatSessionHandler<TEvent> {
 			const taskInstructions = this.adapter.extractTaskInstructions(event);
 			const threadKey = this.adapter.getThreadKey(event);
 
-			// Check if there's already an active session for this thread
-			const existingSessionId = this.threadSessions.get(threadKey);
+			// Check if there's already an active session for this thread, matching
+			// on the canonical key or any alias (a conversation whose canonical key
+			// shifts between turns still resolves to its original session).
+			const existingSessionId = this.resolveThreadSession(event, threadKey);
 
 			// Only events explicitly allowed to *start* a session may do so — e.g.
 			// a Slack/Feishu @mention. A plain message in an unbound thread (no
@@ -209,6 +233,10 @@ export class ChatSessionHandler<TEvent> {
 			});
 
 			if (existingSessionId) {
+				// Learn any new keys this event carries (e.g. a thread_id that only
+				// appeared once the topic was born) so later turns resolve directly.
+				this.registerThreadAliases(event, existingSessionId);
+
 				const existingSession =
 					this.sessionManager.getSession(existingSessionId);
 				const existingRunner =
@@ -232,7 +260,7 @@ export class ChatSessionHandler<TEvent> {
 						this.logger.info(
 							`Session ${existingSessionId} is still running; queuing follow-up for after the turn (thread ${threadKey})`,
 						);
-						this.queuePendingFollowup(threadKey, event);
+						this.queuePendingFollowup(existingSessionId, event);
 						await this.adapter.notifyBusy(event, threadKey);
 					}
 					return;
@@ -307,8 +335,10 @@ export class ChatSessionHandler<TEvent> {
 				return;
 			}
 
-			// Track this thread → session mapping for follow-up messages
+			// Track this thread → session mapping for follow-up messages, plus any
+			// alias keys so a later turn keyed differently still finds this session.
 			this.threadSessions.set(threadKey, sessionId);
+			this.registerThreadAliases(event, sessionId);
 
 			// Initialize session metadata
 			if (!session.metadata) {
@@ -535,44 +565,69 @@ export class ChatSessionHandler<TEvent> {
 		}
 	}
 
-	private queuePendingFollowup(threadKey: string, event: TEvent): void {
-		const queue = this.pendingFollowups.get(threadKey) ?? [];
+	private queuePendingFollowup(sessionId: string, event: TEvent): void {
+		const queue = this.pendingFollowups.get(sessionId) ?? [];
 		queue.push(event);
-		this.pendingFollowups.set(threadKey, queue);
+		this.pendingFollowups.set(sessionId, queue);
 	}
 
-	private threadKeyForSession(sessionId: string): string | undefined {
-		for (const [threadKey, id] of this.threadSessions) {
-			if (id === sessionId) {
-				return threadKey;
+	/**
+	 * Resolve an existing session for this event by its canonical thread key or
+	 * any alias key the adapter advertises. Returns undefined when no session is
+	 * bound to any of them.
+	 */
+	private resolveThreadSession(
+		event: TEvent,
+		threadKey: string,
+	): string | undefined {
+		const direct =
+			this.threadSessions.get(threadKey) ?? this.threadAliases.get(threadKey);
+		if (direct) {
+			return direct;
+		}
+		for (const aliasKey of this.adapter.getThreadAliasKeys?.(event) ?? []) {
+			const sessionId =
+				this.threadSessions.get(aliasKey) ?? this.threadAliases.get(aliasKey);
+			if (sessionId) {
+				return sessionId;
 			}
 		}
 		return undefined;
 	}
 
 	/**
-	 * Re-dispatch any follow-ups queued for a thread while it was busy. Runs
+	 * Record every alias key this event carries as pointing at `sessionId`, so a
+	 * later turn keyed on any of them resolves to the same session. Never
+	 * overwrites a canonical `threadSessions` entry (thread ids are globally
+	 * unique, so an alias can only ever belong to this one conversation).
+	 */
+	private registerThreadAliases(event: TEvent, sessionId: string): void {
+		for (const aliasKey of this.adapter.getThreadAliasKeys?.(event) ?? []) {
+			if (!this.threadSessions.has(aliasKey)) {
+				this.threadAliases.set(aliasKey, sessionId);
+			}
+		}
+	}
+
+	/**
+	 * Re-dispatch any follow-ups queued for a session while it was busy. Runs
 	 * after the current turn settles (the runner has finalized), so each
 	 * re-dispatched event takes the normal resume path. Any that still find the
 	 * runner running re-queue themselves and are drained on the next completion.
 	 */
 	private drainPendingFollowups(sessionId: string): void {
-		const threadKey = this.threadKeyForSession(sessionId);
-		if (!threadKey) {
-			return;
-		}
-		const queue = this.pendingFollowups.get(threadKey);
+		const queue = this.pendingFollowups.get(sessionId);
 		if (!queue || queue.length === 0) {
 			return;
 		}
-		this.pendingFollowups.delete(threadKey);
+		this.pendingFollowups.delete(sessionId);
 		// Defer so the just-finished runner has fully transitioned to not-running
 		// before the follow-up is re-evaluated (otherwise it would re-queue).
 		setImmediate(() => {
 			for (const event of queue) {
 				this.handleEvent(event).catch((error: unknown) => {
 					this.logger.error(
-						`Failed to re-dispatch queued ${this.adapter.platformName} follow-up (thread ${threadKey})`,
+						`Failed to re-dispatch queued ${this.adapter.platformName} follow-up (session ${sessionId})`,
 						error instanceof Error ? error : new Error(String(error)),
 					);
 				});

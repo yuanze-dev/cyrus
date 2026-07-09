@@ -128,24 +128,51 @@ export function buildPromptText(payload: FeishuEventPayload): string {
 }
 
 /**
- * Derive the thread root shared by every message in a Feishu conversation.
+ * The ordered set of identities a Feishu conversation can be keyed by, most
+ * stable first: `thread_id` → `root_id` → `message_id`. Deduped, and never
+ * empty (a message always has a `messageId`).
  *
- * Keys on the conversation ROOT MESSAGE id so an initiating @mention and all its
- * in-thread follow-ups agree, across every Feishu flow:
- * - A reply (topic or plain) carries `root_id` = the topic/thread root message
- *   id, so it keys on `rootId`.
- * - The root message itself has no `root_id`, so it keys on its own `messageId`.
- * Because a reply's `root_id` equals the root message's `messageId`, the two
- * always collide.
+ * `thread_id` (`omt_…`) leads because it is the ONE identity stable across an
+ * entire Feishu topic: once Cyrus replies `reply_in_thread`, every subsequent
+ * message in the topic carries the same `thread_id`, even when Feishu reroots a
+ * reply's `root_id` onto a different card (the production failure this fixes —
+ * the answer's `root_id` no longer matched the question's, so the two split
+ * into separate zero-history sessions).
  *
- * `thread_id` (`omt_…`) is deliberately NOT used: it is absent on a plain
- * @mention that only becomes a topic after Cyrus replies `reply_in_thread`, yet
- * present on the subsequent follow-ups — so keying on it would split one
- * conversation across two sessions. `root_id`/`messageId` are stable across the
- * whole flow.
+ * The full ordered list is what makes the switch safe: the initiating @mention
+ * of a plain group has no `thread_id` (the topic is only born once Cyrus
+ * replies), so it keys on `root_id`/`messageId`, while its later in-topic
+ * follow-ups key on `thread_id`. Consumers resolve a session against ALL of
+ * these candidates (see `ChatSessionHandler`'s alias lookup), so the two halves
+ * of one conversation still reconcile to a single session.
+ *
+ * @see feishuThreadRoot — the single canonical key (this list's head).
+ */
+export function feishuThreadRootCandidates(
+	payload: FeishuEventPayload,
+): string[] {
+	const ordered = [payload.threadId, payload.rootId, payload.messageId];
+	const seen = new Set<string>();
+	const candidates: string[] = [];
+	for (const id of ordered) {
+		if (id && !seen.has(id)) {
+			seen.add(id);
+			candidates.push(id);
+		}
+	}
+	return candidates;
+}
+
+/**
+ * Derive the canonical thread root for a Feishu conversation: `thread_id` when
+ * the message is in a topic, else `root_id` (a reply), else the message's own
+ * `messageId` (a fresh @mention). This is the head of
+ * {@link feishuThreadRootCandidates}; the remaining candidates back it up as
+ * session-lookup aliases so a conversation whose key shifts from `messageId`/
+ * `root_id` to `thread_id` mid-flight stays a single session.
  */
 export function feishuThreadRoot(payload: FeishuEventPayload): string {
-	return payload.rootId || payload.messageId;
+	return feishuThreadRootCandidates(payload)[0] ?? payload.messageId;
 }
 
 /**

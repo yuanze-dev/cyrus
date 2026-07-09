@@ -15,6 +15,7 @@ export {
 	decodeFeishuContent,
 	FeishuMessageTranslator,
 	feishuThreadRoot,
+	feishuThreadRootCandidates,
 	stripMention,
 } from "./FeishuMessageTranslator.js";
 export type {

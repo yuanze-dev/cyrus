@@ -8,6 +8,7 @@ import {
 	decodeFeishuContent,
 	FeishuMessageTranslator,
 	feishuThreadRoot,
+	feishuThreadRootCandidates,
 	stripMention,
 } from "../src/FeishuMessageTranslator.js";
 import {
@@ -80,8 +81,8 @@ describe("decodeFeishuContent", () => {
 });
 
 describe("feishuThreadRoot", () => {
-	it("prefers rootId, then messageId — never threadId", () => {
-		// A reply keys on its root_id (the conversation root message id).
+	it("prefers threadId, then rootId, then messageId", () => {
+		// In a topic, thread_id is the stable identity across the whole topic.
 		expect(
 			feishuThreadRoot({
 				...testMessageWebhookEvent.payload,
@@ -89,8 +90,17 @@ describe("feishuThreadRoot", () => {
 				threadId: "omt_x",
 				messageId: "om_msg",
 			}),
+		).toBe("omt_x");
+		// No thread_id (plain reply) → keys on the conversation root message id.
+		expect(
+			feishuThreadRoot({
+				...testMessageWebhookEvent.payload,
+				rootId: "om_root",
+				threadId: undefined,
+				messageId: "om_msg",
+			}),
 		).toBe("om_root");
-		// The root message itself has no root_id → keys on its own message id.
+		// Neither thread_id nor root_id (a fresh @mention) → keys on its own id.
 		expect(
 			feishuThreadRoot({
 				...testMentionWebhookEvent.payload,
@@ -99,17 +109,52 @@ describe("feishuThreadRoot", () => {
 				messageId: "om_only",
 			}),
 		).toBe("om_only");
-		// Regression: a topic-root @mention (thread_id present, no root_id) must
-		// key on messageId — NOT threadId — so it matches its follow-up replies
-		// (whose root_id equals this message id).
+	});
+});
+
+describe("feishuThreadRootCandidates", () => {
+	it("orders thread_id → root_id → message_id and dedupes", () => {
 		expect(
-			feishuThreadRoot({
-				...testMentionWebhookEvent.payload,
-				rootId: undefined,
+			feishuThreadRootCandidates({
+				...testMessageWebhookEvent.payload,
 				threadId: "omt_x",
+				rootId: "om_root",
+				messageId: "om_msg",
+			}),
+		).toEqual(["omt_x", "om_root", "om_msg"]);
+	});
+
+	it("omits absent identities, always keeping messageId", () => {
+		// Fresh @mention: only its own message id.
+		expect(
+			feishuThreadRootCandidates({
+				...testMentionWebhookEvent.payload,
+				threadId: undefined,
+				rootId: undefined,
+				messageId: "om_only",
+			}),
+		).toEqual(["om_only"]);
+		// Topic root @mention: thread_id then its own message id (no root_id).
+		expect(
+			feishuThreadRootCandidates({
+				...testMentionWebhookEvent.payload,
+				threadId: "omt_x",
+				rootId: undefined,
 				messageId: "om_topic_root",
 			}),
-		).toBe("om_topic_root");
+		).toEqual(["omt_x", "om_topic_root"]);
+	});
+
+	it("dedupes when identities coincide", () => {
+		// A reply whose root_id equals its own message id collapses to one key.
+		expect(
+			feishuThreadRootCandidates({
+				...testMessageWebhookEvent.payload,
+				threadId: undefined,
+				rootId: "om_same",
+				messageId: "om_same",
+			}),
+		).toEqual(["om_same"]);
 	});
 });
 
@@ -167,18 +212,19 @@ describe("FeishuMessageTranslator", () => {
 			expect(data.tenantKey).toBe("tenant_1");
 		});
 
-		it("maps a plain message to a UserPromptMessage keyed on the thread root", () => {
+		it("maps a plain message to a UserPromptMessage keyed on the thread id", () => {
 			const result = translator.translate(testMessageWebhookEvent);
 			expect(result.success).toBe(true);
 			if (!result.success) return;
 			const msg = result.message;
 			expect(msg.action).toBe("user_prompt");
-			// rootId om_msg1 groups the follow-up with the originating mention
-			expect(msg.sessionKey).toBe("oc_chat1:om_msg1");
+			// threadId omt_thread1 is the stable identity of the whole topic.
+			expect(msg.sessionKey).toBe("oc_chat1:omt_thread1");
 			if (msg.action !== "user_prompt") return;
 			expect(msg.content).toBe("also add a logout button");
 			const data = msg.platformData as FeishuUserPromptPlatformData;
 			expect(data.thread.rootId).toBe("om_msg1");
+			expect(data.thread.threadId).toBe("omt_thread1");
 		});
 
 		it("translateAsUserPrompt forces a user_prompt even for a mention", () => {
