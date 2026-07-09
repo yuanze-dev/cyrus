@@ -194,7 +194,13 @@ export class FeishuChatAdapter
 	async extractTaskInstructions(
 		event: FeishuWebhookEvent,
 	): Promise<ChatTaskInstructions> {
-		const text = buildPromptText(event.payload);
+		// Drop the bot's OWN @mention (the `@Cyrus` a user must prepend to address
+		// the bot in a group) before parsing the runner prefix — otherwise a group
+		// message like "@Cyrus /codex …" leaves `/codex` off the start of the text
+		// and the prefix silently fails to route (IN-39). Matched by open_id, so a
+		// bot display name with spaces / CJK is handled robustly.
+		const botOpenId = this.tokenProvider?.getCachedBotOpenId();
+		const text = buildPromptText(event.payload, botOpenId);
 		const prefixResult = stripFeishuRunnerPrefix(text);
 		// Download any images the message carries and describe them so the model
 		// can view them with the Read tool. Best-effort: image failures never block
