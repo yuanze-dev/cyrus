@@ -1,8 +1,11 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { IAgentRunner, ILogger } from "cyrus-core";
 import { createLogger } from "cyrus-core";
 import {
 	buildPromptText,
 	containsMarkdown,
+	extractFeishuImageKeys,
 	FeishuMessageService,
 	FeishuReactionService,
 	type FeishuThreadMessage,
@@ -12,8 +15,12 @@ import {
 	feishuThreadRoot,
 	feishuThreadRootCandidates,
 } from "cyrus-feishu-event-transport";
+import { fileTypeFromBuffer } from "file-type";
 import type { ChatRepositoryProvider } from "./ChatRepositoryProvider.js";
-import type { ChatPlatformAdapter } from "./ChatSessionHandler.js";
+import {
+	type ChatPlatformAdapter,
+	sanitizeThreadKeyForPath,
+} from "./ChatSessionHandler.js";
 import type { FeishuIssueBindingInput } from "./FeishuIssueNotificationService.js";
 
 /** Full tool name the Feishu agent uses to create Linear issues. */
@@ -46,6 +53,13 @@ export const BEHAVIOURS_PAGE_ROUTE = "/settings/behaviours";
  */
 export const RECENT_CHAT_CONTEXT_WINDOW_MS = 30 * 60 * 1000;
 
+/**
+ * Cap on how many images from a single Feishu message are downloaded and handed
+ * to the model, bounding both API calls and prompt bloat. Mirrors the Linear
+ * attachment limit.
+ */
+export const MAX_FEISHU_IMAGES_PER_MESSAGE = 20;
+
 /** Feishu reaction added when a message is received and queued for processing. */
 export const RECEIPT_EMOJI = "OnIt";
 
@@ -71,6 +85,12 @@ export class FeishuChatAdapter
 	private behavioursPageUrl: string;
 	private apiBaseUrl: string | undefined;
 	private fullAccess: boolean;
+	/**
+	 * Cyrus home directory. Root under which per-thread image attachments are
+	 * stored (`<cyrusHome>/feishu-attachments/<thread>/`). When unset, images in
+	 * a message can't be downloaded and the session degrades to text only.
+	 */
+	private cyrusHome: string | undefined;
 	private onIssueCreated:
 		| ((binding: FeishuIssueBindingInput) => void)
 		| undefined;
@@ -106,6 +126,12 @@ export class FeishuChatAdapter
 			/** Feishu open-platform base URL (feishu.cn vs larksuite.com). */
 			apiBaseUrl?: string;
 			/**
+			 * Cyrus home directory, used to derive the per-thread directory where
+			 * images attached to a Feishu message are downloaded so the session can
+			 * read them. Omit to disable image download (text-only).
+			 */
+			cyrusHome?: string;
+			/**
 			 * When true, the session runs as a full-capability agent with
 			 * unrestricted host access (see `FEISHU_FULL_ACCESS`). Only affects
 			 * the system prompt here — the actual tool/filesystem grant is wired
@@ -139,6 +165,7 @@ export class FeishuChatAdapter
 			? `${appBaseUrl}${BEHAVIOURS_PAGE_ROUTE}`
 			: "";
 		this.apiBaseUrl = options?.apiBaseUrl;
+		this.cyrusHome = options?.cyrusHome;
 		this.fullAccess = options?.fullAccess ?? false;
 		this.logger = logger ?? createLogger({ component: "FeishuChatAdapter" });
 	}
@@ -161,8 +188,145 @@ export class FeishuChatAdapter
 		}
 	}
 
-	extractTaskInstructions(event: FeishuWebhookEvent): string {
-		return buildPromptText(event.payload) || "Ask the user for more context";
+	async extractTaskInstructions(event: FeishuWebhookEvent): Promise<string> {
+		const text = buildPromptText(event.payload);
+		// Download any images the message carries and describe them so the model
+		// can view them with the Read tool. Best-effort: image failures never block
+		// the text prompt.
+		const imageSection = await this.buildImageSection(event);
+
+		if (imageSection) {
+			return text ? `${text}\n\n${imageSection}` : imageSection;
+		}
+		return text || "Ask the user for more context";
+	}
+
+	/**
+	 * Download every image attached to a Feishu message (a standalone `image`
+	 * message, or images embedded in a `post`) into a per-thread directory the
+	 * session can read, and return a manifest referencing their local paths.
+	 *
+	 * Best-effort throughout — returns "":
+	 *  - when the message carries no images, or
+	 *  - when no `cyrusHome` is configured (image download disabled).
+	 * When images exist but downloading them fails (no token, missing
+	 * `im:resource` permission, network error), returns a short human-readable
+	 * note instead of the manifest so the model can tell the user their image
+	 * couldn't be read rather than silently ignoring it.
+	 */
+	private async buildImageSection(event: FeishuWebhookEvent): Promise<string> {
+		const imageKeys = extractFeishuImageKeys(event.payload);
+		if (imageKeys.length === 0) {
+			return "";
+		}
+		if (!this.cyrusHome) {
+			this.logger.warn(
+				"Feishu message contains image(s) but no cyrusHome is configured; skipping image download",
+			);
+			return this.formatImageFailureNote(imageKeys.length);
+		}
+
+		const token = await this.getToken();
+		if (!token) {
+			this.logger.warn(
+				"Cannot download Feishu image(s): no tenant_access_token available",
+			);
+			return this.formatImageFailureNote(imageKeys.length);
+		}
+
+		const limitedKeys = imageKeys.slice(0, MAX_FEISHU_IMAGES_PER_MESSAGE);
+		const skipped = imageKeys.length - limitedKeys.length;
+		if (skipped > 0) {
+			this.logger.warn(
+				`Feishu message carried ${imageKeys.length} images; downloading only the first ${MAX_FEISHU_IMAGES_PER_MESSAGE}`,
+			);
+		}
+
+		const threadKey = this.getThreadKey(event);
+		const dir = join(
+			this.cyrusHome,
+			"feishu-attachments",
+			sanitizeThreadKeyForPath(threadKey),
+		);
+		const service = new FeishuMessageService(this.apiBaseUrl);
+
+		const localPaths: string[] = [];
+		let failed = 0;
+		try {
+			await mkdir(dir, { recursive: true });
+		} catch (error) {
+			this.logger.warn(
+				`Failed to create Feishu attachments dir ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return this.formatImageFailureNote(imageKeys.length);
+		}
+
+		for (const [index, imageKey] of limitedKeys.entries()) {
+			try {
+				const { buffer, contentType } = await service.downloadMessageResource({
+					token,
+					messageId: event.payload.messageId,
+					fileKey: imageKey,
+				});
+				const ext = await resolveImageExtension(buffer, contentType);
+				// Name by messageId + index so repeated downloads of the same message
+				// are idempotent and images from different messages never collide.
+				const filename = `${sanitizeThreadKeyForPath(event.payload.messageId)}_${index + 1}${ext}`;
+				const filePath = join(dir, filename);
+				await writeFile(filePath, buffer);
+				localPaths.push(filePath);
+			} catch (error) {
+				failed++;
+				this.logger.warn(
+					`Failed to download Feishu image ${imageKey} (message ${event.payload.messageId}): ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+
+		if (localPaths.length === 0) {
+			return this.formatImageFailureNote(imageKeys.length);
+		}
+		return this.formatImageManifest(localPaths, failed, skipped);
+	}
+
+	/** Manifest listing successfully-downloaded images for the model to Read. */
+	private formatImageManifest(
+		localPaths: string[],
+		failed: number,
+		skipped: number,
+	): string {
+		const lines = [
+			"<feishu_attached_images>",
+			`  The user's Feishu message included ${localPaths.length} image${
+				localPaths.length > 1 ? "s" : ""
+			}, downloaded locally. Use the Read tool on each path to view the image and factor it into your response:`,
+		];
+		localPaths.forEach((path, index) => {
+			lines.push(`  ${index + 1}. ${path}`);
+		});
+		if (failed > 0) {
+			lines.push(
+				`  Note: ${failed} additional image${failed > 1 ? "s" : ""} failed to download and could not be included.`,
+			);
+		}
+		if (skipped > 0) {
+			lines.push(
+				`  Note: ${skipped} further image${skipped > 1 ? "s were" : " was"} skipped (per-message image limit).`,
+			);
+		}
+		lines.push("</feishu_attached_images>");
+		return lines.join("\n");
+	}
+
+	/** Note shown when images were present but none could be downloaded. */
+	private formatImageFailureNote(count: number): string {
+		return `<feishu_attached_images>
+  The user's Feishu message included ${count} image${count > 1 ? "s" : ""}, but ${
+		count > 1 ? "they" : "it"
+	} could not be downloaded (the Cyrus app may be missing message-image read permission). Let the user know you could not view the image${
+		count > 1 ? "s" : ""
+	} and, if relevant, ask them to describe ${count > 1 ? "them" : "it"} or re-share.
+</feishu_attached_images>`;
 	}
 
 	/**
@@ -796,6 +960,32 @@ ${msg.text}
     </content>
   </message>`;
 	}
+}
+
+/**
+ * Resolve a file extension (with leading dot) for a downloaded Feishu image,
+ * sniffing the magic bytes first and falling back to the reported content type,
+ * then to `.png`. Keeps the on-disk filename meaningful so the Read tool detects
+ * the image type correctly.
+ */
+async function resolveImageExtension(
+	buffer: Buffer,
+	contentType?: string,
+): Promise<string> {
+	try {
+		const detected = await fileTypeFromBuffer(buffer);
+		if (detected?.ext) {
+			return `.${detected.ext}`;
+		}
+	} catch {
+		// Fall through to content-type / default.
+	}
+	const subtype = contentType?.split(";")[0]?.trim().split("/")[1];
+	if (subtype) {
+		// "jpeg" is the canonical subtype; keep the conventional ".jpg" extension.
+		return subtype === "jpeg" ? ".jpg" : `.${subtype}`;
+	}
+	return ".png";
 }
 
 /** A Linear issue recovered from a `mcp__linear__save_issue` tool result. */

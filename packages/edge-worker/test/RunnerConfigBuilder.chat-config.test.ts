@@ -56,10 +56,12 @@ describe("RunnerConfigBuilder.buildChatConfig", () => {
 		});
 
 		const expectedAutoMemoryDir = join(cyrusHome, "slack-memory");
+		const expectedAttachmentsDir = join(cyrusHome, "slack-attachments");
 		expect(config.autoMemoryDirectory).toBe(expectedAutoMemoryDir);
 		expect(config.allowedDirectories).toEqual([
 			workspacePath,
 			expectedAutoMemoryDir,
+			expectedAttachmentsDir,
 			...repositoryPaths,
 		]);
 	});

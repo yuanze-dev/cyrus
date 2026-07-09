@@ -278,6 +278,15 @@ export class RunnerConfigBuilder {
 			`${input.platformName}-memory`,
 		);
 
+		// Per-platform root for message attachments (e.g. Feishu images the user
+		// sends in a thread). The adapter downloads into per-thread subdirs here;
+		// granting Read on the whole root lets the session view any of them via the
+		// Read tool. Lives under cyrusHome, parallel to the auto-memory dir.
+		const attachmentsDirectory = join(
+			input.cyrusHome,
+			`${input.platformName}-attachments`,
+		);
+
 		return {
 			workingDirectory: input.workspacePath,
 			allowedTools,
@@ -288,6 +297,7 @@ export class RunnerConfigBuilder {
 			allowedDirectories: [
 				input.workspacePath,
 				autoMemoryDirectory,
+				attachmentsDirectory,
 				...repositoryPaths,
 			],
 			workspaceName: input.workspaceName,

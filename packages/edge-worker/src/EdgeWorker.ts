@@ -1322,6 +1322,7 @@ export class EdgeWorker extends EventEmitter {
 				repositoryRoutingContext: routingContext,
 				cyrusAppBaseUrl,
 				apiBaseUrl: feishuBaseUrl,
+				cyrusHome: this.cyrusHome,
 				fullAccess: feishuFullAccess,
 				userDirectory: this.feishuUserDirectory ?? undefined,
 				onIssueCreated: (binding) =>
