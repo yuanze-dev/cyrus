@@ -427,6 +427,16 @@
 								},
 								"required": ["email"],
 								"additionalProperties": false
+							},
+							{
+								"type": "object",
+								"properties": {
+									"openId": {
+										"type": "string"
+									}
+								},
+								"required": ["openId"],
+								"additionalProperties": false
 							}
 						]
 					}
@@ -456,6 +466,16 @@
 									}
 								},
 								"required": ["email"],
+								"additionalProperties": false
+							},
+							{
+								"type": "object",
+								"properties": {
+									"openId": {
+										"type": "string"
+									}
+								},
+								"required": ["openId"],
 								"additionalProperties": false
 							}
 						]

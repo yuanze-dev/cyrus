@@ -12,11 +12,14 @@ export type RunnerType = z.infer<typeof RunnerTypeSchema>;
  * - String: treated as user ID (e.g., "usr_abc123")
  * - Object with id: explicit user ID match
  * - Object with email: email-based match
+ * - Object with openId: Feishu (Lark) open_id match (e.g., "ou_abc123"), so a
+ *   chat user with no Linear identity can still be allow/block-listed (IN-50).
  */
 export const UserIdentifierSchema = z.union([
 	z.string(), // Treated as user ID
 	z.object({ id: z.string() }), // Explicit user ID
 	z.object({ email: z.string() }), // Email address
+	z.object({ openId: z.string() }), // Feishu open_id
 ]);
 
 /**

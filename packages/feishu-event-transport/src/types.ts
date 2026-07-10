@@ -8,6 +8,7 @@
 
 import type { InternalMessage } from "cyrus-core";
 import type { FastifyInstance } from "fastify";
+import type { EventDeduplicator } from "./EventDeduplicator.js";
 
 /**
  * Verification mode for Feishu webhooks.
@@ -53,6 +54,13 @@ export interface FeishuEventTransportConfig {
 	 * in which case the transport falls back to a group-heuristic classification.
 	 */
 	getBotOpenId?: () => string | undefined;
+	/**
+	 * Shared `event_id` deduplicator (IN-42 §5 P5 / IN-50). Pass the SAME instance
+	 * to both {@link FeishuEventTransport} and {@link FeishuWsClient} so an event
+	 * delivered over both the webhook and the long connection is injected once.
+	 * Omit to fall back to a private per-transport window (legacy behavior).
+	 */
+	deduplicator?: EventDeduplicator;
 }
 
 /**
