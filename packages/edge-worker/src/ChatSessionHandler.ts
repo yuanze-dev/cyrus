@@ -190,6 +190,25 @@ export interface ChatSessionHandlerDeps {
 	 * execution to anyone who can message the bot.
 	 */
 	fullAccess?: boolean;
+	/**
+	 * Cross-channel injection hook (IN-42 §5 P3). Invoked when a thread resolves —
+	 * via the persisted {@link correlationRegistry} — to a session this chat
+	 * handler does NOT own (e.g. a Linear agent session the thread was bound to
+	 * when it created the issue). Rather than driving the follow-up as a local
+	 * chat session (which would build a chat system prompt and reply to the wrong
+	 * place), the handler hands it to EdgeWorker, which serializes it onto the
+	 * target session's queue, checks authorization (红线), leaves a Linear-side
+	 * trace, and injects it into the foreign session's runner.
+	 *
+	 * Optional — omitted (undefined) keeps the handler's legacy same-channel-only
+	 * behavior, which is how the feature stays flag-gated and reversible.
+	 */
+	onForeignSessionPrompt?: (params: {
+		sessionId: string;
+		event: unknown;
+		threadKey: string;
+		text: string;
+	}) => Promise<void>;
 	onWebhookStart: () => void;
 	onWebhookEnd: () => void;
 	onStateChange: () => Promise<void>;
@@ -330,6 +349,32 @@ export class ChatSessionHandler<TEvent> {
 					this.sessionManager.getSession(existingSessionId);
 				const existingRunner =
 					this.sessionManager.getAgentRunner(existingSessionId);
+
+				// Cross-channel injection (IN-42 §5 P3): the thread resolved to a
+				// session this chat handler does NOT own — a Linear agent session the
+				// thread was bound to when it created the issue. Hand the follow-up to
+				// EdgeWorker's cross-channel injector (serial queue + Linear-side trace
+				// + authorization guard) rather than driving it as a local chat
+				// session (which would build a chat system prompt and reply to the
+				// wrong place). A `requestedRunnerType` is ignored here: a foreign
+				// session's engine is fixed, so there is nothing to switch.
+				if (
+					this.deps.onForeignSessionPrompt &&
+					existingSession &&
+					this.isForeignSession(existingSession)
+				) {
+					this.logger.info(
+						`Routing ${this.adapter.platformName} follow-up in thread ${threadKey} into foreign session ${existingSessionId} (cross-channel injection)`,
+					);
+					await this.deps.onForeignSessionPrompt({
+						sessionId: existingSessionId,
+						event,
+						threadKey,
+						text: taskInstructions,
+					});
+					return;
+				}
+
 				if (extractedInstructions.requestedRunnerType) {
 					const lockedRunnerType =
 						getLockedRunnerType(existingSession) ??
@@ -712,6 +757,25 @@ export class ChatSessionHandler<TEvent> {
 		const queue = this.pendingFollowups.get(sessionId) ?? [];
 		queue.push(event);
 		this.pendingFollowups.set(sessionId, queue);
+	}
+
+	/**
+	 * Whether `session` belongs to a different channel than this chat handler —
+	 * i.e. a session this handler did not create and must not drive as a local
+	 * chat session (IN-42 §5 P3). Chat sessions created here carry no
+	 * `externalSessionId` and no `issueContext` (see
+	 * {@link AgentSessionManager.createChatSession}); a Linear agent session
+	 * always carries an `externalSessionId` (its Linear AgentSession id). That
+	 * asymmetry is a reliable discriminator: any session with an
+	 * `externalSessionId`, or an `issueContext.trackerId` that isn't this
+	 * platform, is foreign.
+	 */
+	private isForeignSession(session: CyrusAgentSession): boolean {
+		if (session.externalSessionId) {
+			return true;
+		}
+		const trackerId = session.issueContext?.trackerId;
+		return trackerId != null && trackerId !== this.adapter.platformName;
 	}
 
 	/**

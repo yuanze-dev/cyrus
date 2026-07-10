@@ -410,6 +410,35 @@ export class FeishuChatAdapter
 		};
 	}
 
+	/**
+	 * Human-readable label for the requesting Feishu user, used when tracing a
+	 * cross-channel injection into another channel's timeline (IN-42 §5 P3), e.g.
+	 * "来自飞书 张三 (ou_xxx) 的追问". Prefers the webhook-carried display name,
+	 * then a directory lookup, and always falls back to the bare open_id so a
+	 * label is never empty.
+	 */
+	async getAuthorLabel(event: FeishuWebhookEvent): Promise<string> {
+		const openId = event.payload.user;
+		if (event.payload.userName) {
+			return `${event.payload.userName} (${openId})`;
+		}
+		if (openId && this.userDirectory) {
+			try {
+				const token = await this.getToken();
+				if (token) {
+					const names = await this.userDirectory.resolveNames(token, [openId]);
+					const resolved = names.get(openId);
+					if (resolved) {
+						return `${resolved} (${openId})`;
+					}
+				}
+			} catch {
+				// Best-effort — fall through to the bare open_id.
+			}
+		}
+		return openId ?? "unknown";
+	}
+
 	buildSystemPrompt(event: FeishuWebhookEvent): string {
 		const repositoryPaths = Array.from(
 			new Set(this.repositoryProvider.getRepositoryPaths().filter(Boolean)),
@@ -938,6 +967,34 @@ ${recent.reply}
 		} catch (error) {
 			this.logger.warn(
 				`Failed to post Feishu busy notice: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	/**
+	 * Notify the thread that a cross-channel follow-up was NOT applied because the
+	 * requester is not authorized to steer the bound session (IN-42 §5 P3 红线).
+	 * Kept deliberately vague about the target session so it doesn't disclose
+	 * details of a task the user may not own.
+	 */
+	async notifyCrossChannelBlocked(
+		event: FeishuWebhookEvent,
+		_threadKey: string,
+	): Promise<void> {
+		const token = await this.getToken();
+		if (!token) {
+			return;
+		}
+		try {
+			await new FeishuMessageService(this.apiBaseUrl).replyMessage({
+				token,
+				messageId: event.payload.messageId,
+				text: "抱歉，你没有权限向这个任务追加消息（该任务由其他会话发起）。",
+				replyInThread: true,
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Failed to post Feishu cross-channel block notice: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}

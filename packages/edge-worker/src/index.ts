@@ -46,6 +46,7 @@ export type {
 	IssueRunnerConfigInput,
 } from "./RunnerConfigBuilder.js";
 export { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
+export { SessionSerialQueue } from "./SessionSerialQueue.js";
 export { SharedApplicationServer } from "./SharedApplicationServer.js";
 export { SkillsPluginResolver } from "./SkillsPluginResolver.js";
 export { SlackChatAdapter } from "./SlackChatAdapter.js";

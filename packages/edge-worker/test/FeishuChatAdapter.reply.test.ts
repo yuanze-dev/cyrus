@@ -130,3 +130,50 @@ describe("FeishuChatAdapter.postReply Markdown card", () => {
 		expect(replySpy).not.toHaveBeenCalled();
 	});
 });
+
+describe("FeishuChatAdapter cross-channel helpers (IN-42 §5 P3)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("getAuthorLabel prefers the webhook display name over a directory lookup", async () => {
+		const adapter = new FeishuChatAdapter(
+			staticProvider(),
+			tokenProvider(),
+			undefined,
+		);
+		const label = await adapter.getAuthorLabel(mentionEvent());
+		expect(label).toBe("Ada (ou_requester)");
+	});
+
+	it("getAuthorLabel falls back to the bare open_id when no name is known", async () => {
+		const adapter = new FeishuChatAdapter(
+			staticProvider(),
+			tokenProvider(),
+			undefined,
+		);
+		const event = mentionEvent();
+		(event.payload as Any).userName = undefined;
+		const label = await adapter.getAuthorLabel(event);
+		expect(label).toBe("ou_requester");
+	});
+
+	it("notifyCrossChannelBlocked replies in-thread that the user is not authorized", async () => {
+		const replySpy = vi
+			.spyOn(FeishuMessageService.prototype, "replyMessage")
+			.mockResolvedValue(undefined);
+		const adapter = new FeishuChatAdapter(
+			staticProvider(),
+			tokenProvider(),
+			undefined,
+		);
+
+		await adapter.notifyCrossChannelBlocked(mentionEvent(), "oc_chat:om_root");
+
+		expect(replySpy).toHaveBeenCalledTimes(1);
+		const call = replySpy.mock.calls[0][0];
+		expect(call.messageId).toBe("om_msg");
+		expect(call.replyInThread).toBe(true);
+		expect(call.text).toContain("没有权限");
+	});
+});

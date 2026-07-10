@@ -375,6 +375,119 @@ describe("ChatSessionHandler session-initiation gate", () => {
 	});
 });
 
+describe("ChatSessionHandler cross-channel foreign-session routing (IN-42 §5 P3)", () => {
+	it("routes a follow-up whose thread resolves to a foreign (Linear) session to onForeignSessionPrompt instead of creating a chat session", async () => {
+		const agentSessionManager = new AgentSessionManager();
+		const correlationRegistry = new SessionCorrelationRegistry();
+
+		// Seed a Linear agent session in the shared singleton — a session the chat
+		// handler does NOT own (has externalSessionId + issueContext.trackerId=linear).
+		agentSessionManager.createCyrusAgentSession(
+			"linear-sess-1",
+			"issue-1",
+			{
+				id: "issue-1",
+				identifier: "IN-99",
+				title: "Cross-channel issue",
+				branchName: "in-99",
+			},
+			{ path: "/tmp/in-99", isGitWorktree: true },
+			"linear",
+		);
+		// Bind the Feishu thread key to that Linear session (as component 4 would).
+		correlationRegistry.bind("foreign-thread", "linear-sess-1");
+
+		const adapter = new TestChatAdapter("foreign-thread");
+		// A plain follow-up (not session-initiating) in the bound thread.
+		adapter.isSessionInitiatingEvent = () => false;
+		vi.spyOn(adapter, "extractTaskInstructions").mockReturnValue(
+			"also add a modulo method",
+		);
+
+		const createRunner = vi.fn();
+		const onForeignSessionPrompt = vi.fn().mockResolvedValue(undefined);
+
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			agentSessionManager,
+			correlationRegistry,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onForeignSessionPrompt,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		const event = { eventId: "follow-up", threadKey: "foreign-thread" };
+		await handler.handleEvent(event as any);
+
+		// The follow-up was handed to the cross-channel injector, verbatim...
+		expect(onForeignSessionPrompt).toHaveBeenCalledTimes(1);
+		expect(onForeignSessionPrompt).toHaveBeenCalledWith({
+			sessionId: "linear-sess-1",
+			event,
+			threadKey: "foreign-thread",
+			text: "also add a modulo method",
+		});
+		// ...and NO local chat runner/session was spun up for it.
+		expect(createRunner).not.toHaveBeenCalled();
+	});
+
+	it("still drives an owned chat session locally (does not misroute same-channel follow-ups)", async () => {
+		const shared = sharedChatDeps();
+		const adapter = new TestChatAdapter("owned-thread");
+		let initiating = true;
+		adapter.isSessionInitiatingEvent = () => initiating;
+		const onForeignSessionPrompt = vi.fn().mockResolvedValue(undefined);
+
+		const createRunner = vi.fn(
+			() =>
+				({
+					supportsStreamingInput: true,
+					start: vi.fn().mockResolvedValue({ sessionId: "s1" }),
+					startStreaming: vi.fn().mockResolvedValue({ sessionId: "s1" }),
+					stop: vi.fn(),
+					isRunning: vi.fn().mockReturnValue(true),
+					isStreaming: vi.fn().mockReturnValue(true),
+					addStreamMessage: vi.fn(),
+					getMessages: vi.fn().mockReturnValue([]),
+				}) as any,
+		);
+
+		const handler = new ChatSessionHandler(adapter, {
+			cyrusHome: TEST_CYRUS_CHAT,
+			...shared,
+			chatRepositoryProvider: createStaticProvider([]),
+			runnerConfigBuilder: createMockRunnerConfigBuilder(),
+			createRunner,
+			onForeignSessionPrompt,
+			onWebhookStart: vi.fn(),
+			onWebhookEnd: vi.fn(),
+			onStateChange: vi.fn().mockResolvedValue(undefined),
+			onClaudeError: vi.fn(),
+		});
+
+		// @mention creates a local chat session (owned by this handler).
+		await handler.handleEvent({
+			eventId: "mention",
+			threadKey: "owned-thread",
+		} as any);
+		expect(createRunner).toHaveBeenCalledTimes(1);
+
+		// A same-channel follow-up must stay local — never routed as foreign.
+		initiating = false;
+		await handler.handleEvent({
+			eventId: "follow-up",
+			threadKey: "owned-thread",
+		} as any);
+
+		expect(onForeignSessionPrompt).not.toHaveBeenCalled();
+	});
+});
+
 describe("ChatSessionHandler processed acknowledgement", () => {
 	it("calls acknowledgeProcessed when the runner emits a result", async () => {
 		const adapter: ChatPlatformAdapter<TestEvent> = new TestChatAdapter(

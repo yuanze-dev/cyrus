@@ -27,6 +27,7 @@ import type {
 	AgentSessionCreatedWebhook,
 	AgentSessionPromptedWebhook,
 	BaseBranchResolution,
+	ChannelBinding,
 	ContentUpdateMessage,
 	CyrusAgentSession,
 	EdgeWorkerConfig,
@@ -186,6 +187,7 @@ import {
 	resolveIssueMcpConfigPath,
 } from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
+import { SessionSerialQueue } from "./SessionSerialQueue.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
 import {
 	type SkillSessionContext,
@@ -281,6 +283,15 @@ export class EdgeWorker extends EventEmitter {
 		{ webhook: Webhook; repos: RepositoryConfig[]; storedAt: number }
 	>();
 	private static readonly PENDING_LIFECYCLE_WEBHOOK_MAX = 256;
+	/**
+	 * IN-42 §5 P3 — per-session serial queue for cross-channel prompt injection.
+	 * Every incoming prompt targeting a given logical session id is chained onto
+	 * that session's tail, so two channels prompting the same session concurrently
+	 * (e.g. a Feishu follow-up landing while a Linear comment is mid-flight) can
+	 * never both observe "runner idle" and start competing turns. See
+	 * {@link injectCrossChannelPrompt}.
+	 */
+	private readonly crossChannelQueue = new SessionSerialQueue();
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
 	private askUserQuestionHandler: AskUserQuestionHandler;
 	/** User access control for whitelisting/blacklisting Linear users */
@@ -1410,6 +1421,19 @@ export class EdgeWorker extends EventEmitter {
 			// still load the native servers (Linear, cyrus-tools, cyrus-docs).
 			getPlatformMcpConfigOverrides: () => undefined,
 			fullAccess: feishuFullAccess,
+			// Cross-channel injection (IN-42 §5 P3): only supplied when the feature
+			// flag is on. When undefined the handler keeps its legacy same-channel
+			// behavior, so the whole feature is off by default and reversible.
+			onForeignSessionPrompt: this.isCrossChannelInjectionEnabled()
+				? async ({ sessionId, event, threadKey, text }) =>
+						this.injectFeishuFollowupIntoForeignSession(
+							sessionId,
+							event as FeishuWebhookEvent,
+							threadKey,
+							text,
+							feishuAdapter,
+						)
+				: undefined,
 			resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
 				const plugins = await this.skillsPluginResolver.resolve();
 				const skills = await this.skillsPluginResolver.discoverSkillNames(
@@ -3785,6 +3809,220 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Whether cross-channel prompt injection (IN-42 §5 P3) is enabled. Driven by
+	 * the `CYRUS_CROSS_CHANNEL_INJECTION` env var, mirroring the opt-in /
+	 * instantly-reversible pattern of {@link getBusOwnershipMode}. Off by default
+	 * so a Feishu follow-up in a thread bound to a Linear session keeps its
+	 * legacy behavior until the operator explicitly enables the feature.
+	 * Recognized truthy values: `on` / `true` / `active` / `all` / `feishu`.
+	 */
+	private isCrossChannelInjectionEnabled(): boolean {
+		const raw = (process.env.CYRUS_CROSS_CHANNEL_INJECTION || "")
+			.trim()
+			.toLowerCase();
+		return (
+			raw === "on" ||
+			raw === "true" ||
+			raw === "active" ||
+			raw === "all" ||
+			raw === "feishu"
+		);
+	}
+
+	/**
+	 * Inject a prompt that arrived on one channel into a logical session owned by
+	 * another (IN-42 §5 P3, AC "飞书追问能注入正在跑的 Linear session").
+	 *
+	 * Everything runs on the target session's serial queue
+	 * ({@link crossChannelQueue}) so concurrent prompts from different channels
+	 * are processed one at a time and can never start competing turns. The order
+	 * of operations is deliberate:
+	 *   1. resolve the live session (drop if it vanished),
+	 *   2. **authorize first** — the 红线 guard runs before any side effect, so an
+	 *      unauthorized prompt never reaches the runner or the timeline,
+	 *   3. leave a Linear-side trace so reviewers see the incoming cross-channel
+	 *      prompt as context,
+	 *   4. inject via the exact same streaming/resume logic Linear comments use
+	 *      ({@link handlePromptWithStreamingCheck}) — mid-turn `addStreamMessage`
+	 *      when the runner is live and streamable, otherwise a `--continue`
+	 *      resume that reuses the session's worktree.
+	 */
+	private async injectCrossChannelPrompt(params: {
+		sessionId: string;
+		text: string;
+		source: MessageSource;
+		authorLabel: string;
+		authorize: () => boolean | Promise<boolean>;
+		onDenied?: () => Promise<void>;
+		onInjected?: (mode: "streamed" | "resumed") => Promise<void>;
+	}): Promise<void> {
+		const { sessionId, text, source, authorLabel } = params;
+		return this.crossChannelQueue.run(sessionId, async () => {
+			const log = this.logger.withContext({ sessionId });
+
+			const session = this.agentSessionManager.getSession(sessionId);
+			if (!session) {
+				log.warn(
+					`[cross-channel] Target session ${sessionId} no longer exists; dropping ${source} injection`,
+				);
+				return;
+			}
+
+			// 红线: authorization guard — verified BEFORE any side effect so an
+			// unauthorized prompt never reaches the runner or leaves a trace.
+			let authorized = false;
+			try {
+				authorized = await params.authorize();
+			} catch (error) {
+				log.warn(
+					`[cross-channel] Authorization check threw for ${source} injection into ${sessionId}; denying`,
+					error,
+				);
+				authorized = false;
+			}
+			if (!authorized) {
+				log.warn(
+					`[cross-channel] Denied ${source} injection into session ${sessionId} (authorization failed)`,
+				);
+				if (params.onDenied) {
+					await params.onDenied().catch(() => undefined);
+				}
+				return;
+			}
+
+			// Resolve the repository backing this session (the streaming/resume path
+			// needs it to rebuild the workspace and post replies).
+			const repoId = this.sessionRepositories.get(sessionId);
+			const repository = repoId ? this.repositories.get(repoId) : undefined;
+			if (!repository) {
+				log.warn(
+					`[cross-channel] No repository resolved for session ${sessionId}; cannot inject ${source} prompt`,
+				);
+				return;
+			}
+
+			// Linear-side trace (AC: timeline 可见留痕). Posted BEFORE injecting so
+			// reviewers see the incoming cross-channel prompt as context leading
+			// into the turn.
+			const sourceLabel = source === "feishu" ? "飞书" : source;
+			try {
+				await this.agentSessionManager.createThoughtActivity(
+					sessionId,
+					`来自${sourceLabel} ${authorLabel} 的追问：\n\n${text}`,
+				);
+			} catch (error) {
+				log.warn(
+					`[cross-channel] Failed to post Linear trace activity for ${sessionId}`,
+					error,
+				);
+			}
+
+			// Three-state injection, reusing the exact Linear comment logic:
+			// running+streaming → addStreamMessage; otherwise a `--continue` resume
+			// that reuses the worktree (covers a completed in-process turn AND a
+			// session restored after a restart with no live runner).
+			const linearWorkspaceId = repository.linearWorkspaceId ?? "";
+			let addedToStream = false;
+			try {
+				addedToStream = await this.handlePromptWithStreamingCheck(
+					session,
+					repository,
+					sessionId,
+					this.agentSessionManager,
+					text,
+					"", // no attachment manifest for a cross-channel text follow-up
+					false, // not a new session
+					[], // no additional allowed directories
+					`cross-channel ${source} injection`,
+					linearWorkspaceId,
+					authorLabel,
+					new Date().toISOString(),
+				);
+			} catch (error) {
+				log.error(
+					`[cross-channel] Failed to inject ${source} prompt into session ${sessionId}`,
+					error instanceof Error ? error : new Error(String(error)),
+				);
+				return;
+			}
+
+			if (params.onInjected) {
+				await params
+					.onInjected(addedToStream ? "streamed" : "resumed")
+					.catch(() => undefined);
+			}
+			log.info(
+				`[cross-channel] Injected ${source} follow-up into session ${sessionId} (${addedToStream ? "streamed into live turn" : "resumed via --continue"})`,
+			);
+		});
+	}
+
+	/**
+	 * Authorize a Feishu follow-up before it is injected into a foreign (Linear)
+	 * session (IN-42 §5 P3 红线). The only threads permitted to steer a Linear
+	 * session are the thread that originally created its issue: we look up the
+	 * Feishu→Linear binding recorded when the issue was created and require the
+	 * incoming event's `chatId` to match. This blocks a Feishu user in chat B
+	 * from injecting into a session that originated from chat A.
+	 */
+	private authorizeFeishuInjection(
+		sessionId: string,
+		event: FeishuWebhookEvent,
+	): boolean {
+		const session = this.agentSessionManager.getSession(sessionId);
+		if (!session) {
+			return false;
+		}
+		const issueIdentifier = session.issueContext?.issueIdentifier;
+		if (!issueIdentifier) {
+			return false;
+		}
+		const binding = this.feishuIssueNotifier.getBinding(issueIdentifier);
+		if (!binding) {
+			return false;
+		}
+		return binding.chatId === event.payload.chatId;
+	}
+
+	/**
+	 * Bridge a Feishu thread follow-up into the Linear session it was bound to
+	 * (IN-42 §5 P3). Builds the author label + authorization guard + source-channel
+	 * notifications, then delegates to {@link injectCrossChannelPrompt}. Called by
+	 * the Feishu {@link ChatSessionHandler} only when the cross-channel flag is on.
+	 */
+	private async injectFeishuFollowupIntoForeignSession(
+		sessionId: string,
+		event: FeishuWebhookEvent,
+		threadKey: string,
+		text: string,
+		adapter: FeishuChatAdapter,
+	): Promise<void> {
+		const authorLabel = await adapter
+			.getAuthorLabel(event)
+			.catch(() => event.payload.user ?? "unknown");
+
+		await this.injectCrossChannelPrompt({
+			sessionId,
+			text,
+			source: "feishu",
+			authorLabel,
+			authorize: () => this.authorizeFeishuInjection(sessionId, event),
+			onDenied: async () => {
+				// The requester is not the thread that owns this session. Tell them
+				// in-thread rather than silently dropping the message.
+				await adapter
+					.notifyCrossChannelBlocked(event, threadKey)
+					.catch(() => undefined);
+			},
+			onInjected: async () => {
+				// Swap the receipt reaction for a "processed" one so the sender sees
+				// their message was picked up, mirroring same-channel handling.
+				await adapter.acknowledgeProcessed?.(event)?.catch(() => undefined);
+			},
+		});
+	}
+
+	/**
 	 * Stash a raw Linear lifecycle webhook for the bus to consume during the
 	 * "switch" phase. See {@link pendingLifecycleWebhooks}.
 	 */
@@ -5059,6 +5297,69 @@ ${taskSection}`;
 			commentBody,
 			baseBranchOverrides,
 			routingMethod,
+		);
+
+		// Cross-channel correlation (IN-42 §5 P3): if this Linear issue originated
+		// from a Feishu thread, bind that thread to the freshly created Linear
+		// session so later Feishu follow-ups inject into it. Gated by the feature
+		// flag so it's a no-op until the operator opts in.
+		if (this.isCrossChannelInjectionEnabled()) {
+			this.bindFeishuOriginThreadToSession(
+				agentSession.id,
+				agentSession.issue?.identifier,
+			);
+		}
+	}
+
+	/**
+	 * Link a Feishu origin thread to a newly created Linear session (IN-42 §5 P3).
+	 *
+	 * When a Feishu thread created this issue, {@link FeishuIssueNotificationService}
+	 * holds a binding (chat / requester / thread-root). We convert it into a
+	 * channelKey → sessionId entry in the correlation registry — keyed exactly like
+	 * the Feishu adapter's thread key (`chatId:threadRoot`) — so a subsequent
+	 * follow-up in that thread resolves to this Linear session and is injected into
+	 * it. We also record the Feishu channel as an overlay {@link ChannelBinding} on
+	 * the session so the logical session carries every channel it is reachable from.
+	 */
+	private bindFeishuOriginThreadToSession(
+		sessionId: string,
+		issueIdentifier: string | undefined,
+	): void {
+		if (!issueIdentifier) {
+			return;
+		}
+		const binding = this.feishuIssueNotifier.getBinding(issueIdentifier);
+		if (!binding) {
+			return;
+		}
+		const threadKey = `${binding.chatId}:${binding.rootMessageId}`;
+		this.globalSessionRegistry.bind(threadKey, sessionId);
+
+		// Overlay the Feishu channel onto the logical session (§Q1), de-duplicated.
+		const session = this.agentSessionManager.getSession(sessionId);
+		if (session) {
+			const channels = session.channels ?? [];
+			const alreadyBound = channels.some(
+				(c) =>
+					c.kind === "feishu" &&
+					c.chatId === binding.chatId &&
+					c.rootMessageId === binding.rootMessageId,
+			);
+			if (!alreadyBound) {
+				const feishuBinding: ChannelBinding = {
+					kind: "feishu",
+					chatId: binding.chatId,
+					threadRoot: binding.rootMessageId,
+					rootMessageId: binding.rootMessageId,
+					openId: binding.openId,
+				};
+				session.channels = [...channels, feishuBinding];
+			}
+		}
+
+		this.logger.info(
+			`[cross-channel] Bound Feishu thread ${threadKey} → Linear session ${sessionId} (issue ${issueIdentifier})`,
 		);
 	}
 
