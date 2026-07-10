@@ -116,6 +116,7 @@ describe("EdgeWorker - Feishu completion notify (IN-10)", () => {
 		vi.mocked(AgentSessionManager).mockImplementation(function () {
 			return {
 				getSessionsByIssueId: vi.fn().mockReturnValue([]),
+				setActivityObserver: vi.fn(),
 				serializeState: vi.fn().mockReturnValue({ sessions: {}, entries: {} }),
 				on: vi.fn(),
 			};

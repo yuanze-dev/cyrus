@@ -92,6 +92,7 @@ describe("EdgeWorker - Session message bus (IN-42 P2)", () => {
 			createResponseActivity: vi.fn().mockResolvedValue(undefined),
 			requestSessionStop: vi.fn(),
 			setActivitySink: vi.fn(),
+			setActivityObserver: vi.fn(),
 			on: vi.fn(),
 		};
 		vi.mocked(AgentSessionManager).mockImplementation(function () {

@@ -168,6 +168,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 		vi.mocked(AgentSessionManager).mockImplementation(function () {
 			return {
 				addSession: vi.fn(),
+				setActivityObserver: vi.fn(),
 				getSession: vi.fn(),
 				removeSession: vi.fn(),
 				getAllSessions: vi.fn().mockReturnValue([]),

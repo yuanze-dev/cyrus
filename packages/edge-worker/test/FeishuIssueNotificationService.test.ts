@@ -221,4 +221,46 @@ describe("FeishuIssueNotificationService", () => {
 		service.restore(undefined);
 		expect(service.hasBinding("IN-42")).toBe(false);
 	});
+
+	it("posts a canceled notice via notifyIssueStateChange", async () => {
+		const { service } = makeService(notifier);
+		service.recordIssueBinding(BINDING);
+
+		const notified = await service.notifyIssueStateChange({
+			issueIdentifier: "IN-42",
+			stateType: "canceled",
+		});
+
+		expect(notified).toBe(true);
+		const text = notifier.mock.calls[0][0].text as string;
+		expect(text).toContain("已取消");
+		expect(text).toContain("Ship the thing");
+	});
+
+	it("stamps notifiedAt for canceled too, so it does not double-notify", async () => {
+		const { service } = makeService(notifier);
+		service.recordIssueBinding(BINDING);
+
+		const first = await service.notifyIssueStateChange({
+			issueIdentifier: "IN-42",
+			stateType: "canceled",
+		});
+		const second = await service.notifyIssueStateChange({
+			issueIdentifier: "IN-42",
+			stateType: "canceled",
+		});
+
+		expect(first).toBe(true);
+		expect(second).toBe(false);
+		expect(notifier).toHaveBeenCalledTimes(1);
+	});
+
+	it("notifyIssueStateChange defaults to the completed message", async () => {
+		const { service } = makeService(notifier);
+		service.recordIssueBinding(BINDING);
+
+		await service.notifyIssueStateChange({ issueIdentifier: "IN-42" });
+		const text = notifier.mock.calls[0][0].text as string;
+		expect(text).toContain("已完成");
+	});
 });

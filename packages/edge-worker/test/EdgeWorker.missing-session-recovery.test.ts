@@ -105,6 +105,7 @@ describe("EdgeWorker - Missing Session/Repository Recovery (CYPACK-852)", () => 
 			postAnalyzingThought: vi.fn().mockResolvedValue(undefined),
 			requestSessionStop: vi.fn(),
 			setActivitySink: vi.fn(),
+			setActivityObserver: vi.fn(),
 			on: vi.fn(),
 		};
 
