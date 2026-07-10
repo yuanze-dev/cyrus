@@ -4,7 +4,8 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
-_No internal-only changes._
+### Added
+- Design doc for a runner-agnostic "system context + extensions/skills" configuration, so `CLAUDE.md`/`AGENTS.md`/skills stay portable across Claude/Codex/Gemini/Cursor and switching runners does not drop context. Maps each runner's current system-context/skill injection (with file/symbol refs), proposes a neutral `SystemContextBundle` schema plus a `ContextAdapter` layer in `RunnerConfigBuilder`, and covers switch-fidelity/degradation and the `feishu-memory` relationship. See `docs/design/IN-43-portable-runner-context.md`. ([IN-43](https://linear.app/principle-intl/issue/IN-43))
 
 ## [0.2.66] - 2026-06-19
 
