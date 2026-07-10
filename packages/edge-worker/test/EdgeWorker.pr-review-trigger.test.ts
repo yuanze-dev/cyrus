@@ -153,6 +153,7 @@ describe("EdgeWorker - PR review trigger gate (CYPACK-1273)", () => {
 			createCyrusAgentSession: vi.fn(),
 			getSession: vi.fn().mockReturnValue(null),
 			setActivitySink: vi.fn(),
+			setActivityObserver: vi.fn(),
 			addAgentRunner: vi.fn(),
 			on: vi.fn(),
 		};

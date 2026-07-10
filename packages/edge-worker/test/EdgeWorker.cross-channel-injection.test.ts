@@ -96,6 +96,7 @@ describe("EdgeWorker - Cross-channel injection (IN-42 P3)", () => {
 			createResponseActivity: vi.fn().mockResolvedValue(undefined),
 			getSessionsByIssueId: vi.fn().mockReturnValue([]),
 			setActivitySink: vi.fn(),
+			setActivityObserver: vi.fn(),
 			on: vi.fn(),
 		};
 		vi.mocked(AgentSessionManager).mockImplementation(function () {

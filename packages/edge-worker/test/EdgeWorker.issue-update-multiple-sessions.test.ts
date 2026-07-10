@@ -154,6 +154,7 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 			postAnalyzingThought: vi.fn().mockResolvedValue(undefined),
 			requestSessionStop: vi.fn(),
 			setActivitySink: vi.fn(),
+			setActivityObserver: vi.fn(),
 			addAgentRunner: vi.fn(),
 			on: vi.fn(),
 		};

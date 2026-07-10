@@ -117,33 +117,42 @@ export class FeishuIssueNotificationService {
 	}
 
 	/**
-	 * Notify the originating Feishu thread that an issue was completed.
+	 * Notify the originating Feishu thread that an issue reached a terminal state.
+	 *
+	 * Generalizes the original completion-only notice (IN-42 §Q4 / §5 P4): a
+	 * `completed` issue reports success, a `canceled` issue reports cancellation.
+	 * The single persisted `notifiedAt` stamp makes this idempotent across
+	 * repeated webhooks — an issue has exactly one terminal transition, so the
+	 * first delivered notice wins.
 	 *
 	 * Returns true only when a notice was actually posted. Returns false — without
 	 * side effects — when the issue wasn't Feishu-originated (no binding) or was
 	 * already notified. When delivery throws, the binding is left un-stamped so a
-	 * later completion event can retry, and the error is re-thrown to the caller.
+	 * later event can retry, and the error is re-thrown to the caller.
 	 */
-	async notifyIssueCompleted(params: {
+	async notifyIssueStateChange(params: {
 		issueIdentifier: string;
 		issueId?: string;
 		title?: string;
 		url?: string;
+		/** Terminal state that triggered the notice. Defaults to "completed". */
+		stateType?: "completed" | "canceled";
 	}): Promise<boolean> {
+		const stateType = params.stateType ?? "completed";
 		const binding = this.lookup(params.issueIdentifier, params.issueId);
 		if (!binding) {
 			return false;
 		}
 		if (binding.notifiedAt) {
 			this.logger.debug(
-				`Skipping duplicate Feishu completion notice for ${binding.issueIdentifier} (already notified)`,
+				`Skipping duplicate Feishu ${stateType} notice for ${binding.issueIdentifier} (already notified)`,
 			);
 			return false;
 		}
 
 		const title = params.title || binding.issueTitle || binding.issueIdentifier;
 		const url = params.url || binding.issueUrl;
-		const text = this.composeCompletionMessage(binding, title, url);
+		const text = this.composeStateMessage(binding, stateType, title, url);
 
 		await this.notifier({
 			rootMessageId: binding.rootMessageId,
@@ -155,9 +164,22 @@ export class FeishuIssueNotificationService {
 		this.bindings.set(binding.issueIdentifier, binding);
 		this.onChange?.();
 		this.logger.info(
-			`Posted Feishu completion notice for ${binding.issueIdentifier} to chat ${binding.chatId}`,
+			`Posted Feishu ${stateType} notice for ${binding.issueIdentifier} to chat ${binding.chatId}`,
 		);
 		return true;
+	}
+
+	/**
+	 * Backward-compatible wrapper for the completion case.
+	 * @see notifyIssueStateChange
+	 */
+	async notifyIssueCompleted(params: {
+		issueIdentifier: string;
+		issueId?: string;
+		title?: string;
+		url?: string;
+	}): Promise<boolean> {
+		return this.notifyIssueStateChange({ ...params, stateType: "completed" });
 	}
 
 	/** Look up a binding by identifier, falling back to a UUID scan. */
@@ -182,21 +204,23 @@ export class FeishuIssueNotificationService {
 	}
 
 	/**
-	 * Compose the plain-text completion notice. Feishu text messages do NOT render
-	 * Markdown, so this uses bare URLs (which auto-link) and plain lines. The
-	 * requester's name is included as text — not an @mention — to make clear whom
-	 * it is for without triggering an extra push notification.
+	 * Compose the plain-text terminal-state notice. Feishu text messages do NOT
+	 * render Markdown, so this uses bare URLs (which auto-link) and plain lines.
+	 * The requester's name is included as text — not an @mention — to make clear
+	 * whom it is for without triggering an extra push notification.
 	 */
-	private composeCompletionMessage(
+	private composeStateMessage(
 		binding: SerializedFeishuIssueBinding,
+		stateType: "completed" | "canceled",
 		title: string,
 		url: string | undefined,
 	): string {
 		const who = binding.userName ? `${binding.userName}，` : "";
-		const lines = [
-			`${who}你在飞书发起并转到 Linear 执行的任务已完成 ✅`,
-			`任务：${title}`,
-		];
+		const headline =
+			stateType === "canceled"
+				? `${who}你在飞书发起并转到 Linear 执行的任务已取消 🚫`
+				: `${who}你在飞书发起并转到 Linear 执行的任务已完成 ✅`;
+		const lines = [headline, `任务：${title}`];
 		lines.push(url ? url : `任务编号：${binding.issueIdentifier}`);
 		return lines.join("\n");
 	}

@@ -162,6 +162,10 @@ import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
+import {
+	type FeishuBackflowBinding,
+	FeishuBackflowSink,
+} from "./FeishuBackflowSink.js";
 import { FeishuChatAdapter } from "./FeishuChatAdapter.js";
 import {
 	FeishuIssueNotificationService,
@@ -249,6 +253,13 @@ export class EdgeWorker extends EventEmitter {
 	 * restored) even when Feishu credentials are absent.
 	 */
 	private feishuIssueNotifier: FeishuIssueNotificationService;
+	/**
+	 * Mirrors a Feishu-originated session's milestones (turn-final response,
+	 * failures) back into its Feishu thread (IN-42 §Q4 / §5 P4). Registered as a
+	 * passive {@link AgentSessionManager} observer; a complete no-op while the
+	 * backflow flag is off, so the legacy completion-only notice stands.
+	 */
+	private feishuBackflowSink: FeishuBackflowSink;
 	private currentRunnerTypeByFeishuThread: Map<string, RunnerType> = new Map();
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private gitLabCommentService: GitLabCommentService; // Service for posting comments back to GitLab MRs
@@ -561,6 +572,19 @@ export class EdgeWorker extends EventEmitter {
 				);
 			},
 		);
+
+		// Feishu process backflow (IN-42 §Q4 / §5 P4): reflect a Feishu-originated
+		// session's milestones back into its thread. Registered as a passive
+		// observer and gated live by {@link isFeishuBackflowEnabled}, so flipping the
+		// flag off instantly reverts to the legacy completion-only notice.
+		this.feishuBackflowSink = new FeishuBackflowSink({
+			notifier: (params) => this.postFeishuThreadNotice(params),
+			resolveBinding: (sessionId) =>
+				this.resolveFeishuBackflowBinding(sessionId),
+			isEnabled: () => this.isFeishuBackflowEnabled(),
+			logger: this.logger,
+		});
+		this.agentSessionManager.setActivityObserver(this.feishuBackflowSink);
 
 		// Initialize repositories with path resolution
 		for (const repo of config.repositories) {
@@ -3830,6 +3854,46 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Whether Linear→Feishu process backflow (IN-42 §5 P4) is enabled. Driven by
+	 * the `CYRUS_FEISHU_BACKFLOW` env var, matching the opt-in / instantly
+	 * reversible pattern of {@link isCrossChannelInjectionEnabled}. Off by default:
+	 * only the legacy completion-only notice fires until the operator opts in, at
+	 * which point session milestones (turn-final response, failures) and the
+	 * `canceled` terminal state also flow back to the originating Feishu thread.
+	 * Recognized truthy values: `on` / `true` / `active` / `all` / `feishu`.
+	 */
+	private isFeishuBackflowEnabled(): boolean {
+		const raw = (process.env.CYRUS_FEISHU_BACKFLOW || "").trim().toLowerCase();
+		return (
+			raw === "on" ||
+			raw === "true" ||
+			raw === "active" ||
+			raw === "all" ||
+			raw === "feishu"
+		);
+	}
+
+	/**
+	 * Resolve the Feishu thread a logical session should backflow to, from its
+	 * `feishu` {@link ChannelBinding} overlay (added by
+	 * {@link bindFeishuOriginThreadToSession}). Returns undefined for sessions not
+	 * reachable from Feishu, which makes the backflow sink a no-op for them.
+	 */
+	private resolveFeishuBackflowBinding(
+		sessionId: string,
+	): FeishuBackflowBinding | undefined {
+		const session = this.agentSessionManager.getSession(sessionId);
+		const feishu = session?.channels?.find(
+			(c): c is Extract<ChannelBinding, { kind: "feishu" }> =>
+				c.kind === "feishu",
+		);
+		if (!feishu) {
+			return undefined;
+		}
+		return { chatId: feishu.chatId, rootMessageId: feishu.rootMessageId };
+	}
+
+	/**
 	 * Inject a prompt that arrived on one channel into a logical session owned by
 	 * another (IN-42 §5 P3, AC "飞书追问能注入正在跑的 Linear session").
 	 *
@@ -4763,20 +4827,26 @@ ${taskSection}`;
 			return;
 		}
 
-		// Notify the originating Feishu thread when a Feishu-created issue is
-		// completed (Done). No-op for canceled issues and for issues that did not
-		// originate from Feishu; idempotent across repeated completion events.
-		if (stateType === "completed") {
+		// Notify the originating Feishu thread when a Feishu-created issue reaches a
+		// terminal state. `completed` always fires (the legacy completion-only
+		// notice); `canceled` only fires when process backflow is enabled (IN-42 §5
+		// P4). No-op for issues that did not originate from Feishu; idempotent
+		// across repeated webhooks via the persisted `notifiedAt` stamp.
+		const shouldNotifyState =
+			stateType === "completed" ||
+			(stateType === "canceled" && this.isFeishuBackflowEnabled());
+		if (shouldNotifyState) {
 			try {
-				await this.feishuIssueNotifier.notifyIssueCompleted({
+				await this.feishuIssueNotifier.notifyIssueStateChange({
 					issueIdentifier,
 					issueId: completedIssueId,
 					title: issueTitle,
 					url: issueUrl,
+					stateType,
 				});
 			} catch (error) {
 				this.logger.warn(
-					`Failed to post Feishu completion notice for ${issueIdentifier}: ${
+					`Failed to post Feishu ${stateType} notice for ${issueIdentifier}: ${
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);

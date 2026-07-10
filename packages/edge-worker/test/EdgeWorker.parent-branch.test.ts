@@ -140,6 +140,7 @@ describe("EdgeWorker - Parent Branch Handling", () => {
 			postAnalyzingThought: vi.fn().mockResolvedValue(null),
 			createThoughtActivity: vi.fn().mockResolvedValue(undefined),
 			setActivitySink: vi.fn(),
+			setActivityObserver: vi.fn(),
 			on: vi.fn(), // EventEmitter method
 		};
 		vi.mocked(AgentSessionManager).mockImplementation(function () {

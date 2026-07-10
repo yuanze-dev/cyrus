@@ -112,6 +112,7 @@ describe("EdgeWorker - Feedback Delivery Timeout Issue", () => {
 		mockAgentSessionManager = {
 			hasAgentRunner: vi.fn().mockReturnValue(false),
 			getSession: vi.fn().mockReturnValue(null),
+			setActivityObserver: vi.fn(),
 			on: vi.fn(), // EventEmitter method
 		};
 

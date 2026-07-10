@@ -11,6 +11,7 @@ import type {
 	SDKUserMessage,
 } from "cyrus-claude-runner";
 import {
+	type AgentActivityContent,
 	type AgentPendingWork,
 	AgentSessionStatus,
 	AgentSessionType,
@@ -59,6 +60,22 @@ export declare interface AgentSessionManager {
 }
 
 /**
+ * A secondary, read-only observer of every activity posted to a session's
+ * primary sink. Unlike {@link IActivitySink} (one per session, owns the
+ * canonical post), an observer is process-global and passive: it is offered a
+ * copy of each activity *after* it lands on the primary tracker, and it must
+ * neither block nor fail that path. Used by the Feishu backflow (IN-42 §Q4) to
+ * mirror milestones into the originating Feishu thread.
+ */
+export interface ActivityObserver {
+	onActivity(
+		sessionId: string,
+		content: AgentActivityContent,
+		options?: ActivityPostOptions,
+	): void | Promise<void>;
+}
+
+/**
  * Manages Agent Sessions integration with Claude Code SDK
  * Transforms Claude streaming messages into Agent Session format
  * Handles session lifecycle: create → active → complete/error
@@ -69,6 +86,8 @@ export declare interface AgentSessionManager {
 export class AgentSessionManager extends EventEmitter {
 	private logger: ILogger;
 	private activitySinks: Map<string, IActivitySink> = new Map(); // Per-session activity sinks
+	/** Process-global passive observer of posted activities (e.g. Feishu backflow). */
+	private activityObserver?: ActivityObserver;
 	private sessions: Map<string, CyrusAgentSession> = new Map();
 	private entries: Map<string, CyrusAgentSessionEntry[]> = new Map(); // Stores a list of session entries per each session by its id
 	private activeTasksBySession: Map<string, string> = new Map(); // Maps session ID to active Task tool use ID
@@ -125,6 +144,47 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private getActivitySink(sessionId: string): IActivitySink | undefined {
 		return this.activitySinks.get(sessionId);
+	}
+
+	/**
+	 * Register (or clear with `undefined`) the process-global activity observer.
+	 * There is at most one; the caller (EdgeWorker) is responsible for routing to
+	 * the right destination per session.
+	 */
+	setActivityObserver(observer: ActivityObserver | undefined): void {
+		this.activityObserver = observer;
+	}
+
+	/**
+	 * Offer a posted activity to the observer, fire-and-forget. Any error is
+	 * swallowed so the observer can never disturb the primary activity path.
+	 */
+	private notifyActivityObserver(
+		sessionId: string,
+		content: AgentActivityContent,
+		options?: ActivityPostOptions,
+	): void {
+		const observer = this.activityObserver;
+		if (!observer) {
+			return;
+		}
+		try {
+			void Promise.resolve(
+				observer.onActivity(sessionId, content, options),
+			).catch((error) => {
+				this.sessionLog(sessionId).debug(
+					`Activity observer rejected: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			});
+		} catch (error) {
+			this.sessionLog(sessionId).debug(
+				`Activity observer threw synchronously: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
 	}
 
 	/**
@@ -1304,6 +1364,9 @@ export class AgentSessionManager extends EventEmitter {
 				options,
 			);
 
+			// Mirror the posted activity to the passive observer (Feishu backflow).
+			this.notifyActivityObserver(sessionId, content, options);
+
 			if (result.activityId) {
 				entry.linearAgentActivityId = result.activityId;
 				if (entry.type === "result") {
@@ -1532,6 +1595,9 @@ export class AgentSessionManager extends EventEmitter {
 				input.content,
 				options,
 			);
+
+			// Mirror the posted activity to the passive observer (Feishu backflow).
+			this.notifyActivityObserver(sessionId, input.content, options);
 
 			if (result.activityId) {
 				log.debug(`Created ${label} activity ${result.activityId}`);
