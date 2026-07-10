@@ -494,6 +494,68 @@ describe("CursorRunner (SDK adapter)", () => {
 		expect(sdkMock.create).not.toHaveBeenCalled();
 	});
 
+	it("prepends appendSystemPrompt to the prompt on the first turn", async () => {
+		const workspace = tempWorkspace();
+		const cyrusHome = tempWorkspace();
+		const stubAgent = sdkMock.__install({
+			agentId: "agent-sys",
+			events: [
+				{ type: "system", subtype: "init", agent_id: "agent-sys", run_id: "r" },
+				{
+					type: "status",
+					agent_id: "agent-sys",
+					run_id: "r",
+					status: "FINISHED",
+				},
+			],
+		});
+
+		const runner = new CursorRunner({
+			cyrusHome,
+			workingDirectory: workspace,
+			appendSystemPrompt: "GLOBAL RULES: attribute commits.",
+		});
+		await runner.start("do the thing");
+
+		expect(stubAgent.send).toHaveBeenCalledTimes(1);
+		expect(stubAgent.send.mock.calls[0][0]).toBe(
+			"GLOBAL RULES: attribute commits.\n\ndo the thing",
+		);
+	});
+
+	it("does NOT re-prepend appendSystemPrompt when resuming a session", async () => {
+		const workspace = tempWorkspace();
+		const cyrusHome = tempWorkspace();
+		const stubAgent = sdkMock.__install({
+			agentId: "agent-sys-resume",
+			events: [
+				{
+					type: "system",
+					subtype: "init",
+					agent_id: "agent-sys-resume",
+					run_id: "r",
+				},
+				{
+					type: "status",
+					agent_id: "agent-sys-resume",
+					run_id: "r",
+					status: "FINISHED",
+				},
+			],
+		});
+
+		const runner = new CursorRunner({
+			cyrusHome,
+			workingDirectory: workspace,
+			resumeSessionId: "agent-sys-resume",
+			appendSystemPrompt: "GLOBAL RULES: attribute commits.",
+		});
+		await runner.start("follow-up prompt");
+
+		expect(stubAgent.send).toHaveBeenCalledTimes(1);
+		expect(stubAgent.send.mock.calls[0][0]).toBe("follow-up prompt");
+	});
+
 	it("emits an error result when SDK send throws", async () => {
 		const workspace = tempWorkspace();
 		const cyrusHome = tempWorkspace();

@@ -24,6 +24,7 @@ import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
 import { appendCloudRuntimeAddendum } from "./prompts/cloudRuntimePromptAddendum.js";
 import { appendFailureModeAddendum } from "./prompts/failureModePromptAddendum.js";
+import { appendGlobalOperatingRulesAddendum } from "./prompts/globalOperatingRulesAddendum.js";
 
 const FEISHU_CODEX_LINEAR_ISSUE_ADDENDUM = `
 
@@ -335,14 +336,17 @@ export class RunnerConfigBuilder {
 			workspaceName: input.workspaceName,
 			cyrusHome: input.cyrusHome,
 			autoMemoryDirectory,
-			appendSystemPrompt: appendCloudRuntimeAddendum(
-				appendFeishuCodexLinearIssueAddendum(
-					appendBrowserUseAddendum(
-						appendFailureModeAddendum(input.systemPrompt),
+			appendSystemPrompt: appendGlobalOperatingRulesAddendum(
+				appendCloudRuntimeAddendum(
+					appendFeishuCodexLinearIssueAddendum(
+						appendBrowserUseAddendum(
+							appendFailureModeAddendum(input.systemPrompt),
+						),
+						input.platformName,
+						input.runnerType,
 					),
-					input.platformName,
-					input.runnerType,
 				),
+				{ cyrusHome: input.cyrusHome, runnerType: input.runnerType },
 			),
 			...(input.platformName === "feishu" && input.runnerType === "claude"
 				? { canUseTool: buildFeishuClaudeLinearIssueCanUseTool() }
@@ -481,8 +485,13 @@ export class RunnerConfigBuilder {
 			cyrusHome: input.cyrusHome,
 			mcpConfigPath,
 			mcpConfig,
-			appendSystemPrompt: appendCloudRuntimeAddendum(
-				appendBrowserUseAddendum(appendFailureModeAddendum(input.systemPrompt)),
+			appendSystemPrompt: appendGlobalOperatingRulesAddendum(
+				appendCloudRuntimeAddendum(
+					appendBrowserUseAddendum(
+						appendFailureModeAddendum(input.systemPrompt),
+					),
+				),
+				{ cyrusHome: input.cyrusHome, runnerType },
 			),
 			// Priority order: label override > repository config > global default
 			model: finalModel,

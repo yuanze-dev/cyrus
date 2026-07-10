@@ -527,13 +527,25 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 			}
 			this.emitInitMessage();
 
+			// The Cursor SDK has no dedicated system-prompt field, so Cyrus's
+			// `appendSystemPrompt` (label-based prompt, global operating rules,
+			// failure-mode/addendums) would otherwise be dropped entirely on the
+			// issue-session path. Prepend it to the prompt on the first turn only;
+			// on resume the agent already carries that context server-side, so
+			// re-sending it would just bloat every follow-up turn.
+			const systemPrompt = this.config.appendSystemPrompt?.trim();
+			const outboundPrompt =
+				systemPrompt && !this.config.resumeSessionId
+					? `${systemPrompt}\n\n${prompt}`
+					: prompt;
+
 			console.log(
-				`[CursorRunner] Sending prompt to agent ${agent.agentId} (resume=${Boolean(this.config.resumeSessionId)})`,
+				`[CursorRunner] Sending prompt to agent ${agent.agentId} (resume=${Boolean(this.config.resumeSessionId)}, systemPrompt=${Boolean(systemPrompt && !this.config.resumeSessionId)})`,
 			);
 
 			let caughtError: unknown;
 			try {
-				const run = await agent.send(prompt, {
+				const run = await agent.send(outboundPrompt, {
 					onDelta: ({ update }) => {
 						// `turn-ended` is the only delta carrying token totals.
 						// Each fire is a per-turn snapshot — accumulate across
