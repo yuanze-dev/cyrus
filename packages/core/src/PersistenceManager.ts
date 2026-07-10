@@ -102,6 +102,11 @@ export interface SerializableEdgeWorkerState {
 	agentSessionEntries?: Record<string, SerializedCyrusAgentSessionEntry[]>;
 	// Child to parent agent session mapping
 	childToParentAgentSession?: Record<string, string>;
+	// Channel correlation index (IN-42 §5 P0): stable channel key → logical
+	// session id (e.g. Feishu "chatId:threadRoot" → sessionId). Lets an incoming
+	// message from any channel resolve to the same session. Shadow-recorded only
+	// in P0; does not affect the legacy event path.
+	sessionChannelIndex?: Record<string, string>;
 	// Issue to repository mapping (for caching user repository selections)
 	// v4.1: string[] (multi-repo). Migration: old Record<string, string> auto-converts.
 	issueRepositoryCache?: Record<string, string[]>;

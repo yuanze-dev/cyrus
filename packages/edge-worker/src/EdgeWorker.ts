@@ -56,6 +56,8 @@ import {
 	CLIRPCServer,
 	createLogger,
 	DEFAULT_PROXY_URL,
+	hasLinearSessionStartPlatformData,
+	hasLinearUserPromptPlatformData,
 	isAgentSessionCreatedWebhook,
 	isAgentSessionPromptedWebhook,
 	isContentUpdateMessage,
@@ -3616,6 +3618,11 @@ ${taskSection}`;
 			);
 		}
 
+		// Shadow-record the channel → session correlation (IN-42 §5 P0). Pure
+		// additive bookkeeping into the SessionCorrelationRegistry; the legacy
+		// `event` path remains the source of truth and is unaffected.
+		this.shadowRecordChannelCorrelation(message);
+
 		try {
 			// Route to specific message handlers based on action type
 			if (isSessionStartMessage(message)) {
@@ -3647,6 +3654,71 @@ ${taskSection}`;
 			);
 			// Don't re-throw message processing errors to prevent application crashes
 		}
+	}
+
+	/**
+	 * Shadow-record the correlation between an incoming message's channel key(s)
+	 * and its logical session id (IN-42 §5 P0).
+	 *
+	 * This is the "base" phase: it only writes into the
+	 * {@link SessionCorrelationRegistry} channel index (persisted alongside the
+	 * child→parent map) and is never read by the legacy `event` path, so it
+	 * cannot change existing behavior. Later phases activate the unified
+	 * `handleMessage` handlers that read this index to route cross-channel prompts.
+	 *
+	 * At P0 a definitive session id is only available at the bus layer for Linear
+	 * (its `sessionKey` IS the agent session id). For Feishu/Slack the logical
+	 * session id is still owned by the legacy chat path, so we only reconcile
+	 * against an existing binding (alias-merge) rather than inventing one.
+	 */
+	private shadowRecordChannelCorrelation(message: InternalMessage): void {
+		try {
+			const sessionId = this.deriveCorrelationSessionId(message);
+			if (!sessionId) return;
+			this.globalSessionRegistry.bind(message.sessionKey, sessionId);
+			for (const alias of message.sessionKeyAliases ?? []) {
+				this.globalSessionRegistry.bind(alias, sessionId);
+			}
+		} catch (error) {
+			// Never let shadow bookkeeping disrupt message handling.
+			this.logger.debug(
+				"[MessageBus] Shadow correlation record skipped",
+				error,
+			);
+		}
+	}
+
+	/**
+	 * Derive the logical session id an incoming message correlates to, or
+	 * undefined if it cannot be determined at the bus layer in this phase.
+	 * See {@link shadowRecordChannelCorrelation}.
+	 */
+	private deriveCorrelationSessionId(
+		message: InternalMessage,
+	): string | undefined {
+		// Linear: the agent session id is authoritative and present on the message.
+		if (
+			isSessionStartMessage(message) &&
+			hasLinearSessionStartPlatformData(message)
+		) {
+			return message.platformData.agentSession?.id;
+		}
+		if (
+			isUserPromptMessage(message) &&
+			hasLinearUserPromptPlatformData(message)
+		) {
+			return message.platformData.agentSession?.id;
+		}
+
+		// Other channels (Feishu/Slack): reconcile against an existing binding on
+		// the primary key or any alias, without inventing a session id.
+		const existing = this.globalSessionRegistry.resolve(message.sessionKey);
+		if (existing) return existing;
+		for (const alias of message.sessionKeyAliases ?? []) {
+			const resolved = this.globalSessionRegistry.resolve(alias);
+			if (resolved) return resolved;
+		}
+		return undefined;
 	}
 
 	/**
@@ -7257,9 +7329,11 @@ ${input.userComment}
 		// Serialize Agent Session state - flat structure from single ASM
 		const serializedState = this.agentSessionManager.serializeState();
 
-		// Serialize child to parent agent session mapping from GlobalSessionRegistry
+		// Serialize child to parent agent session mapping + channel correlation
+		// index from the SessionCorrelationRegistry
 		const registryState = this.globalSessionRegistry.serializeState();
 		const childToParentAgentSession = registryState.childToParentMap;
+		const sessionChannelIndex = registryState.sessionChannelIndex;
 
 		// Serialize issue to repository cache from RepositoryRouter
 		const issueRepositoryCache = Object.fromEntries(
@@ -7270,6 +7344,7 @@ ${input.userComment}
 			agentSessions: serializedState.sessions,
 			agentSessionEntries: serializedState.entries,
 			childToParentAgentSession,
+			sessionChannelIndex,
 			issueRepositoryCache,
 			feishuIssueNotifications: this.feishuIssueNotifier.serialize(),
 			feishuCreatedIssueRunners:
@@ -7328,6 +7403,17 @@ ${input.userComment}
 			}
 			this.logger.debug(
 				`Restored ${entries.length} child-to-parent agent session mappings`,
+			);
+		}
+
+		// Restore channel correlation index into the SessionCorrelationRegistry
+		if (state.sessionChannelIndex) {
+			const entries = Object.entries(state.sessionChannelIndex);
+			for (const [channelKey, sessionId] of entries) {
+				this.globalSessionRegistry.bind(channelKey, sessionId);
+			}
+			this.logger.debug(
+				`Restored ${entries.length} channel correlation mapping(s)`,
 			);
 		}
 

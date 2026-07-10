@@ -4,7 +4,8 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
-_No internal-only changes._
+### Added
+- Session correlation base for the unified Session · multi-Channel effort (IN-42 §5 P0). `GlobalSessionRegistry` is upgraded to `SessionCorrelationRegistry` (old name kept as a backward-compatible alias) with a `channelKey → sessionId` index (`bind`/`resolve`/`unbind`/`getChannelKeysForSession`) that lives alongside the existing child→parent map and is persisted as `sessionChannelIndex` in the EdgeWorker state. Internal messages now carry optional `sessionKeyAliases`, and the Feishu translator emits them (`chatId:rootId` / `chatId:messageId`) so a thread whose primary key shifts from `chatId:messageId` to `chatId:threadId` mid-flight reconciles to one session. `EdgeWorker.handleMessage` shadow-records these correlations without touching the legacy `event` path (behavior unchanged). ([IN-45](https://linear.app/principle-intl/issue/IN-45))
 
 ## [0.2.66] - 2026-06-19
 

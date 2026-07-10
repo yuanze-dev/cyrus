@@ -78,6 +78,20 @@ export interface InternalMessageBase {
 	 * - Slack: channel:thread_ts
 	 */
 	sessionKey: string;
+	/**
+	 * Additional, equally-valid session keys for the same conversation, most
+	 * stable first. Used by the session correlation base (IN-42 §5 P0) to
+	 * reconcile a conversation whose primary key shifts mid-flight to a single
+	 * logical session.
+	 *
+	 * Feishu is the motivating case: the initiating @mention has no `thread_id`
+	 * (the topic is only born once the bot replies), so it keys on
+	 * `chatId:messageId`, while later in-topic follow-ups key on
+	 * `chatId:threadId`. Listing the fallback candidates as aliases lets both
+	 * halves resolve to the same session. Absent/empty when the primary key is
+	 * the only identity (e.g. Linear agent sessions).
+	 */
+	sessionKeyAliases?: string[];
 	/** Work item ID (issue ID, PR ID, etc.) */
 	workItemId: string;
 	/** Human-readable work item identifier (e.g., "DEF-123", "owner/repo#456") */

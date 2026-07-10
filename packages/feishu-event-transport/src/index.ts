@@ -18,6 +18,7 @@ export {
 	decodeFeishuImageKeys,
 	extractFeishuImageKeys,
 	FeishuMessageTranslator,
+	feishuSessionKeyAliases,
 	feishuThreadRoot,
 	feishuThreadRootCandidates,
 	stripMention,

@@ -379,6 +379,35 @@ describe("PersistenceManager", () => {
 			// Should not call writeFile since no migration needed
 			expect(writeFile).not.toHaveBeenCalled();
 		});
+
+		it("should round-trip sessionChannelIndex through save then load (IN-42 §5 P0)", async () => {
+			const state = {
+				agentSessions: {},
+				agentSessionEntries: {},
+				childToParentAgentSession: {},
+				sessionChannelIndex: {
+					"oc_chat1:omt_thread1": "session-123",
+					"oc_chat1:om_msg1": "session-123",
+				},
+			};
+
+			// Capture what gets written to disk, then feed it back to load().
+			let written = "";
+			vi.mocked(writeFile).mockImplementation(async (_path, data) => {
+				written = data as string;
+			});
+			await persistenceManager.saveEdgeWorkerState(state);
+
+			expect(JSON.parse(written).state.sessionChannelIndex).toEqual(
+				state.sessionChannelIndex,
+			);
+
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFile).mockResolvedValue(written);
+			const loaded = await persistenceManager.loadEdgeWorkerState();
+
+			expect(loaded?.sessionChannelIndex).toEqual(state.sessionChannelIndex);
+		});
 	});
 
 	describe("PERSISTENCE_VERSION constant", () => {

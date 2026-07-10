@@ -9,6 +9,7 @@ import {
 	decodeFeishuImageKeys,
 	extractFeishuImageKeys,
 	FeishuMessageTranslator,
+	feishuSessionKeyAliases,
 	feishuThreadRoot,
 	feishuThreadRootCandidates,
 	stripMention,
@@ -195,6 +196,29 @@ describe("feishuThreadRootCandidates", () => {
 	});
 });
 
+describe("feishuSessionKeyAliases", () => {
+	it("is empty for a fresh @mention (only one identity)", () => {
+		expect(
+			feishuSessionKeyAliases({
+				...testMentionWebhookEvent.payload,
+				threadId: undefined,
+				rootId: undefined,
+				messageId: "om_only",
+			}),
+		).toEqual([]);
+	});
+
+	it("lists chatId:candidate for every non-canonical candidate, most stable first", () => {
+		// In-topic follow-up: canonical key is chatId:threadId; the aliases are the
+		// chat-scoped root_id and message_id, which back-reference the topic's
+		// earlier keys so the conversation reconciles to one session.
+		expect(feishuSessionKeyAliases(testMessageWebhookEvent.payload)).toEqual([
+			"oc_chat1:om_msg1",
+			"oc_chat1:om_msg2",
+		]);
+	});
+});
+
 describe("buildPromptText", () => {
 	it("returns the pre-decoded payload text when present", () => {
 		expect(buildPromptText(testMentionWebhookEvent.payload)).toBe(
@@ -285,6 +309,8 @@ describe("FeishuMessageTranslator", () => {
 			expect(msg.source).toBe("feishu");
 			expect(msg.action).toBe("session_start");
 			expect(msg.sessionKey).toBe("oc_chat1:om_msg1");
+			// Fresh @mention has no other identity, so no aliases.
+			expect(msg.sessionKeyAliases).toEqual([]);
 			expect(msg.workItemIdentifier).toBe("feishu:oc_chat1:om_msg1");
 			expect(msg.receivedAt).toBe(new Date(1700000000000).toISOString());
 			if (msg.action !== "session_start") return;
@@ -303,6 +329,11 @@ describe("FeishuMessageTranslator", () => {
 			expect(msg.action).toBe("user_prompt");
 			// threadId omt_thread1 is the stable identity of the whole topic.
 			expect(msg.sessionKey).toBe("oc_chat1:omt_thread1");
+			// Its aliases back-reference the topic's earlier keys (root_id / message_id).
+			expect(msg.sessionKeyAliases).toEqual([
+				"oc_chat1:om_msg1",
+				"oc_chat1:om_msg2",
+			]);
 			if (msg.action !== "user_prompt") return;
 			expect(msg.content).toBe("also add a logout button");
 			const data = msg.platformData as FeishuUserPromptPlatformData;
@@ -315,6 +346,30 @@ describe("FeishuMessageTranslator", () => {
 			expect(result.success).toBe(true);
 			if (!result.success) return;
 			expect(result.message.action).toBe("user_prompt");
+		});
+
+		it("reconciles the opening @mention and later in-topic follow-ups of one thread to a shared key", () => {
+			// The opening @mention keys on chatId:messageId (no thread_id yet)...
+			const start = translator.translate(testMentionWebhookEvent);
+			// ...while a later follow-up keys on chatId:threadId, but carries the
+			// opening message's key among its aliases.
+			const followUp = translator.translate(testMessageWebhookEvent);
+			expect(start.success && followUp.success).toBe(true);
+			if (!start.success || !followUp.success) return;
+
+			const startKeys = [
+				start.message.sessionKey,
+				...(start.message.sessionKeyAliases ?? []),
+			];
+			const followUpKeys = [
+				followUp.message.sessionKey,
+				...(followUp.message.sessionKeyAliases ?? []),
+			];
+
+			// The two message's key sets overlap (chatId:om_msg1), which is what lets
+			// the correlation registry resolve both halves to the same session.
+			const shared = startKeys.filter((k) => followUpKeys.includes(k));
+			expect(shared).toContain("oc_chat1:om_msg1");
 		});
 	});
 });

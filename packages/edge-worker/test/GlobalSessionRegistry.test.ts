@@ -4,7 +4,19 @@
 
 import type { CyrusAgentSession, CyrusAgentSessionEntry } from "@cyrus/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GlobalSessionRegistry } from "../src/GlobalSessionRegistry.js";
+import {
+	GlobalSessionRegistry,
+	SessionCorrelationRegistry,
+} from "../src/GlobalSessionRegistry.js";
+
+describe("SessionCorrelationRegistry naming", () => {
+	it("exposes SessionCorrelationRegistry with GlobalSessionRegistry as a backward-compatible alias", () => {
+		expect(SessionCorrelationRegistry).toBe(GlobalSessionRegistry);
+		expect(new SessionCorrelationRegistry()).toBeInstanceOf(
+			GlobalSessionRegistry,
+		);
+	});
+});
 
 describe("GlobalSessionRegistry", () => {
 	let registry: GlobalSessionRegistry;
@@ -382,6 +394,57 @@ describe("GlobalSessionRegistry", () => {
 		});
 	});
 
+	describe("Channel Correlation (IN-42 §5 P0)", () => {
+		it("should resolve a bound channel key to its session id (hit)", () => {
+			registry.bind("oc_chat:omt_thread", "session-1");
+			expect(registry.resolve("oc_chat:omt_thread")).toBe("session-1");
+		});
+
+		it("should return undefined for an unbound channel key (miss)", () => {
+			registry.bind("oc_chat:omt_thread", "session-1");
+			expect(registry.resolve("oc_chat:other")).toBeUndefined();
+			expect(registry.resolve("never-bound")).toBeUndefined();
+		});
+
+		it("should overwrite an existing binding (last-write-wins)", () => {
+			registry.bind("oc_chat:omt_thread", "session-1");
+			registry.bind("oc_chat:omt_thread", "session-2");
+			expect(registry.resolve("oc_chat:omt_thread")).toBe("session-2");
+		});
+
+		it("should map multiple alias keys to the same session id", () => {
+			// A Feishu topic whose key shifts messageId -> threadId: both the
+			// canonical key and its aliases resolve to one logical session.
+			registry.bind("oc_chat:om_msg1", "session-1");
+			registry.bind("oc_chat:omt_thread", "session-1");
+			expect(registry.resolve("oc_chat:om_msg1")).toBe("session-1");
+			expect(registry.resolve("oc_chat:omt_thread")).toBe("session-1");
+			expect(registry.getChannelKeysForSession("session-1")).toEqual(
+				expect.arrayContaining(["oc_chat:om_msg1", "oc_chat:omt_thread"]),
+			);
+		});
+
+		it("should unbind a channel key", () => {
+			registry.bind("oc_chat:omt_thread", "session-1");
+			expect(registry.unbind("oc_chat:omt_thread")).toBe(true);
+			expect(registry.resolve("oc_chat:omt_thread")).toBeUndefined();
+			expect(registry.unbind("oc_chat:omt_thread")).toBe(false);
+		});
+
+		it("should drop channel bindings when their session is deleted", () => {
+			const session = createMockSession("session-1");
+			registry.createSession(session);
+			registry.bind("oc_chat:om_msg1", "session-1");
+			registry.bind("oc_chat:omt_thread", "session-1");
+
+			registry.deleteSession("session-1");
+
+			expect(registry.resolve("oc_chat:om_msg1")).toBeUndefined();
+			expect(registry.resolve("oc_chat:omt_thread")).toBeUndefined();
+			expect(registry.getChannelKeysForSession("session-1")).toEqual([]);
+		});
+	});
+
 	describe("Serialization", () => {
 		it("should serialize state", () => {
 			const session = createMockSession("session-1", {
@@ -390,6 +453,7 @@ describe("GlobalSessionRegistry", () => {
 			registry.createSession(session);
 			registry.addEntry("session-1", createMockEntry("user", "Hello"));
 			registry.setParentSession("session-1", "parent-1");
+			registry.bind("oc_chat:omt_thread", "session-1");
 
 			const serialized = registry.serializeState();
 
@@ -400,6 +464,9 @@ describe("GlobalSessionRegistry", () => {
 			});
 			expect(serialized.entries["session-1"]).toHaveLength(1);
 			expect(serialized.childToParentMap["session-1"]).toBe("parent-1");
+			expect(serialized.sessionChannelIndex?.["oc_chat:omt_thread"]).toBe(
+				"session-1",
+			);
 		});
 
 		it("should exclude non-serializable agentRunner", () => {
@@ -471,6 +538,8 @@ describe("GlobalSessionRegistry", () => {
 			registry.createSession(session);
 			registry.addEntry("session-1", createMockEntry("user", "Hello"));
 			registry.setParentSession("session-1", "parent-1");
+			registry.bind("oc_chat:om_msg1", "session-1");
+			registry.bind("oc_chat:omt_thread", "session-1");
 
 			const serialized = registry.serializeState();
 			const newRegistry = new GlobalSessionRegistry();
@@ -481,6 +550,25 @@ describe("GlobalSessionRegistry", () => {
 			});
 			expect(newRegistry.getEntries("session-1")).toHaveLength(1);
 			expect(newRegistry.getParentSessionId("session-1")).toBe("parent-1");
+			expect(newRegistry.resolve("oc_chat:om_msg1")).toBe("session-1");
+			expect(newRegistry.resolve("oc_chat:omt_thread")).toBe("session-1");
+		});
+
+		it("should restore state lacking sessionChannelIndex (pre-P0)", () => {
+			// State serialized before the channel index existed must still restore.
+			const serialized = {
+				version: "3.0" as const,
+				sessions: {
+					"session-1": createMockSession("session-1"),
+				},
+				entries: {},
+				childToParentMap: {},
+			};
+
+			registry.restoreState(serialized);
+
+			expect(registry.getSession("session-1")).toBeDefined();
+			expect(registry.resolve("anything")).toBeUndefined();
 		});
 	});
 

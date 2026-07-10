@@ -321,6 +321,23 @@ export function feishuThreadRoot(payload: FeishuEventPayload): string {
 }
 
 /**
+ * The session-key aliases for a Feishu payload: `chatId:candidate` for every
+ * {@link feishuThreadRootCandidates thread-root candidate} EXCEPT the canonical
+ * one (which is already the message's `sessionKey`). Most stable first.
+ *
+ * These are what let a conversation whose primary key shifts from
+ * `chatId:messageId` (the initiating @mention, before a `thread_id` exists) to
+ * `chatId:threadId` (later in-topic follow-ups) reconcile to a single session:
+ * the follow-up's alias list contains the @mention's original key, so the
+ * correlation registry resolves both to the same session id. Empty when the
+ * payload has only one candidate identity.
+ */
+export function feishuSessionKeyAliases(payload: FeishuEventPayload): string[] {
+	const [, ...rest] = feishuThreadRootCandidates(payload);
+	return rest.map((candidate) => `${payload.chatId}:${candidate}`);
+}
+
+/**
  * Translates Feishu webhook events into internal messages.
  *
  * Note: Feishu webhooks can result in either:
@@ -379,6 +396,7 @@ export class FeishuMessageTranslator
 		const organizationId = context?.organizationId || event.tenantKey;
 		const threadRoot = feishuThreadRoot(payload);
 		const sessionKey = `${payload.chatId}:${threadRoot}`;
+		const sessionKeyAliases = feishuSessionKeyAliases(payload);
 		const promptText = buildPromptText(payload);
 
 		const platformData: FeishuUserPromptPlatformData = {
@@ -395,6 +413,7 @@ export class FeishuMessageTranslator
 			receivedAt: this.toIso(payload.createTime),
 			organizationId,
 			sessionKey,
+			sessionKeyAliases,
 			workItemId: `${payload.chatId}:${threadRoot}`,
 			workItemIdentifier: `feishu:${payload.chatId}:${threadRoot}`,
 			author: { id: payload.user, name: payload.user },
@@ -413,6 +432,7 @@ export class FeishuMessageTranslator
 		const organizationId = context?.organizationId || event.tenantKey;
 		const threadRoot = feishuThreadRoot(payload);
 		const sessionKey = `${payload.chatId}:${threadRoot}`;
+		const sessionKeyAliases = feishuSessionKeyAliases(payload);
 		const promptText = buildPromptText(payload);
 
 		const platformData: FeishuSessionStartPlatformData = {
@@ -429,6 +449,7 @@ export class FeishuMessageTranslator
 			receivedAt: this.toIso(payload.createTime),
 			organizationId,
 			sessionKey,
+			sessionKeyAliases,
 			workItemId: `${payload.chatId}:${threadRoot}`,
 			workItemIdentifier: `feishu:${payload.chatId}:${threadRoot}`,
 			author: { id: payload.user, name: payload.user },
