@@ -63,6 +63,7 @@ export type { EdgeWorkerEvents } from "./types.js";
 // User access control
 export {
 	type AccessCheckResult,
+	type AccessSubject,
 	DEFAULT_BLOCK_MESSAGE,
 	UserAccessControl,
 } from "./UserAccessControl.js";

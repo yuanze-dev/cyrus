@@ -83,6 +83,7 @@ import {
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
 import {
+	EventDeduplicator,
 	FeishuEventTransport,
 	FeishuMessageService,
 	FeishuTokenProvider,
@@ -157,6 +158,7 @@ import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
+import { ChannelLoopGuard } from "./ChannelLoopGuard.js";
 import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
@@ -260,6 +262,13 @@ export class EdgeWorker extends EventEmitter {
 	 * backflow flag is off, so the legacy completion-only notice stands.
 	 */
 	private feishuBackflowSink: FeishuBackflowSink;
+	/**
+	 * Content-addressed loop breaker for Feishu (IN-50): marks every notice the
+	 * runtime posts into a Feishu thread and drops any inbound event that echoes a
+	 * recent post, so a completion notice / backflow reply can never bootstrap a
+	 * fresh session. See {@link ChannelLoopGuard}.
+	 */
+	private feishuLoopGuard: ChannelLoopGuard = new ChannelLoopGuard();
 	private currentRunnerTypeByFeishuThread: Map<string, RunnerType> = new Map();
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private gitLabCommentService: GitLabCommentService; // Service for posting comments back to GitLab MRs
@@ -1299,6 +1308,7 @@ export class EdgeWorker extends EventEmitter {
 	 */
 	private postFeishuThreadNotice: FeishuThreadNotifier = async ({
 		rootMessageId,
+		chatId,
 		text,
 	}) => {
 		const token = await this.feishuTokenProvider?.getTenantAccessToken();
@@ -1313,6 +1323,11 @@ export class EdgeWorker extends EventEmitter {
 			text,
 			replyInThread: true,
 		});
+		// Origin marking (IN-50): record what we just posted into this thread so an
+		// echoed re-ingest of the same content is recognized and dropped rather than
+		// bootstrapping a fresh session. Keyed identically to the inbound channel key
+		// (`chatId:threadRoot`).
+		this.feishuLoopGuard.markOutbound(`${chatId}:${rootMessageId}`, text);
 	};
 
 	/**
@@ -1482,6 +1497,12 @@ export class EdgeWorker extends EventEmitter {
 		const feishuVerificationToken = process.env.FEISHU_VERIFICATION_TOKEN;
 		const feishuEncryptKey = process.env.FEISHU_ENCRYPT_KEY;
 
+		// Single event_id deduplicator shared by BOTH the webhook transport and the
+		// long-connection client below (IN-42 §5 P5 / IN-50). Feishu can deliver the
+		// same event over both channels; sharing one window ensures it is injected
+		// exactly once instead of once per transport.
+		const feishuDeduplicator = new EventDeduplicator();
+
 		this.feishuEventTransport = new FeishuEventTransport({
 			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
 			verificationMode: "direct",
@@ -1490,6 +1511,7 @@ export class EdgeWorker extends EventEmitter {
 			encryptKey: feishuEncryptKey,
 			isThreadFollowingEnabled: () => this.isFeishuThreadFollowingEnabled(),
 			getBotOpenId: () => this.feishuTokenProvider?.getCachedBotOpenId(),
+			deduplicator: feishuDeduplicator,
 		});
 
 		this.feishuEventTransport.on("event", (event: FeishuWebhookEvent) => {
@@ -1525,6 +1547,7 @@ export class EdgeWorker extends EventEmitter {
 					domain: feishuBaseUrl?.includes("larksuite.com") ? "lark" : "feishu",
 					isThreadFollowingEnabled: () => this.isFeishuThreadFollowingEnabled(),
 					getBotOpenId: () => this.feishuTokenProvider?.getCachedBotOpenId(),
+					deduplicator: feishuDeduplicator,
 				},
 				this.logger,
 			);
@@ -2916,8 +2939,57 @@ ${taskSection}`;
 	 * runs before `fetchThreadContext`, so it cannot await the Contact API itself.
 	 */
 	private async handleFeishuEvent(event: FeishuWebhookEvent): Promise<void> {
+		// Access control (IN-50): a Feishu chat user carries only an open_id (no
+		// Linear identity), so gate on it via the open_id dimension of
+		// UserAccessControl. Blocked users are dropped silently — Feishu has no
+		// equivalent of Linear's "post a rejection activity" surface, and the whole
+		// point of blocking is to not engage.
+		const openId = event.payload.user;
+		if (openId && this.userAccessControl.hasAnyConfiguration()) {
+			const access = this.userAccessControl.checkAccess(
+				{ openId },
+				this.getDefaultRepositoryId(),
+			);
+			if (!access.allowed) {
+				this.logger.info(
+					`Ignoring Feishu event from open_id ${openId}: ${access.reason}`,
+				);
+				return;
+			}
+		}
+
+		// Loop idempotency (IN-50): drop an inbound event that echoes a notice the
+		// runtime just posted into this thread (create-issue → backflow → re-ingest),
+		// or a duplicate re-delivery of the same content, so it never spins up a new
+		// session. Keyed by the same `chatId:threadRoot` the notifier marks.
+		const loopChannelKey = `${event.payload.chatId}:${feishuThreadRoot(event.payload)}`;
+		if (
+			!this.feishuLoopGuard.shouldProcessInbound(
+				loopChannelKey,
+				event.payload.text,
+			)
+		) {
+			this.logger.info(
+				`Ignoring looped/duplicate Feishu event on ${loopChannelKey} (content already seen)`,
+			);
+			return;
+		}
+
 		await this.enrichFeishuSenderName(event);
 		await this.feishuChatSessionHandler!.handleEvent(event);
+	}
+
+	/**
+	 * The repository id chat sessions default to (they are repo-agnostic and run in
+	 * the first configured repo). Used to resolve repo-scoped access-control config
+	 * for the Feishu open_id gate; empty string when no repositories are configured,
+	 * which leaves only the global allow/blocklist in effect.
+	 */
+	private getDefaultRepositoryId(): string {
+		const first = this.repositories.values().next().value as
+			| RepositoryConfig
+			| undefined;
+		return first?.id ?? "";
 	}
 
 	/**

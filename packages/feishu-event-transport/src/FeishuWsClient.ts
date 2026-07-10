@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import * as lark from "@larksuiteoapi/node-sdk";
 import type { TranslationContext } from "cyrus-core";
 import { createLogger, type ILogger } from "cyrus-core";
+import { EventDeduplicator } from "./EventDeduplicator.js";
 import { FeishuMessageTranslator } from "./FeishuMessageTranslator.js";
 import { normalizeFeishuMessageEvent } from "./normalize.js";
 import type {
@@ -35,6 +36,13 @@ export interface FeishuWsClientConfig {
 	isThreadFollowingEnabled?: () => boolean;
 	/** Live read of the bot's own open_id, for mention detection + self-drop. */
 	getBotOpenId?: () => string | undefined;
+	/**
+	 * Shared `event_id` deduplicator (IN-42 §5 P5 / IN-50). Pass the SAME instance
+	 * used by {@link FeishuEventTransport} so an event delivered over both the
+	 * webhook and this long connection is injected once. Omit to fall back to a
+	 * private per-client window (legacy behavior).
+	 */
+	deduplicator?: EventDeduplicator;
 }
 
 /** The flattened data the SDK EventDispatcher hands to an im.message.receive_v1 handler. */
@@ -64,9 +72,12 @@ export class FeishuWsClient extends EventEmitter {
 	private messageTranslator: FeishuMessageTranslator;
 	private translationContext: TranslationContext;
 	private wsClient: lark.WSClient | undefined;
-	/** Recently seen event_ids, to drop redeliveries on reconnect. */
-	private recentEventIds: Map<string, number> = new Map();
-	private static readonly DEDUP_TTL_MS = 10 * 60 * 1000;
+	/**
+	 * Deduplicator for `event_id`s (drops redeliveries on reconnect). Shared with
+	 * the webhook transport when one is injected, so an event delivered over both
+	 * is processed once; otherwise a private window per IN-50.
+	 */
+	private deduplicator: EventDeduplicator;
 
 	constructor(
 		config: FeishuWsClientConfig,
@@ -78,6 +89,7 @@ export class FeishuWsClient extends EventEmitter {
 		this.logger = logger ?? createLogger({ component: "FeishuWsClient" });
 		this.messageTranslator = new FeishuMessageTranslator();
 		this.translationContext = translationContext ?? {};
+		this.deduplicator = config.deduplicator ?? new EventDeduplicator();
 	}
 
 	/** Set the translation context for message translation. */
@@ -138,12 +150,9 @@ export class FeishuWsClient extends EventEmitter {
 	private handleMessageEvent(data: FeishuWsMessageData): void {
 		try {
 			const eventId = data.event_id ?? data.message?.message_id ?? "";
-			if (eventId && this.isDuplicate(eventId)) {
+			if (eventId && !this.deduplicator.markSeen(eventId)) {
 				this.logger.debug(`Ignoring duplicate Feishu event ${eventId}`);
 				return;
-			}
-			if (eventId) {
-				this.remember(eventId);
 			}
 
 			const result = normalizeFeishuMessageEvent(
@@ -188,24 +197,6 @@ export class FeishuWsClient extends EventEmitter {
 			this.emit("message", result.message);
 		} else {
 			this.logger.debug(`Message translation skipped: ${result.reason}`);
-		}
-	}
-
-	private isDuplicate(eventId: string): boolean {
-		this.pruneRecentEventIds();
-		return this.recentEventIds.has(eventId);
-	}
-
-	private remember(eventId: string): void {
-		this.recentEventIds.set(eventId, Date.now());
-	}
-
-	private pruneRecentEventIds(): void {
-		const now = Date.now();
-		for (const [key, seenAt] of this.recentEventIds) {
-			if (now - seenAt > FeishuWsClient.DEDUP_TTL_MS) {
-				this.recentEventIds.delete(key);
-			}
 		}
 	}
 }

@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { TranslationContext } from "cyrus-core";
 import { createLogger, type ILogger } from "cyrus-core";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { EventDeduplicator } from "./EventDeduplicator.js";
 import { FeishuMessageTranslator } from "./FeishuMessageTranslator.js";
 import { normalizeFeishuMessageEvent } from "./normalize.js";
 import type {
@@ -47,9 +48,12 @@ export class FeishuEventTransport extends EventEmitter {
 	private logger: ILogger;
 	private messageTranslator: FeishuMessageTranslator;
 	private translationContext: TranslationContext;
-	/** Recently seen `event_id`s, used to drop Feishu retry re-deliveries. */
-	private recentEventIds: Map<string, number> = new Map();
-	private static readonly DEDUP_TTL_MS = 10 * 60 * 1000;
+	/**
+	 * Deduplicator for `event_id`s (drops Feishu retry re-deliveries). Shared with
+	 * the long-connection client when one is injected, so an event delivered over
+	 * both transports is processed once; otherwise a private window per IN-50.
+	 */
+	private deduplicator: EventDeduplicator;
 
 	constructor(
 		config: FeishuEventTransportConfig,
@@ -61,6 +65,7 @@ export class FeishuEventTransport extends EventEmitter {
 		this.logger = logger ?? createLogger({ component: "FeishuEventTransport" });
 		this.messageTranslator = new FeishuMessageTranslator();
 		this.translationContext = translationContext ?? {};
+		this.deduplicator = config.deduplicator ?? new EventDeduplicator();
 	}
 
 	/** Set the translation context for message translation. */
@@ -339,17 +344,16 @@ export class FeishuEventTransport extends EventEmitter {
 			return;
 		}
 
-		// De-dup on event_id (Feishu retries reuse it).
+		// De-dup on event_id (Feishu retries reuse it, and the webhook + long
+		// connection can each deliver the same id — the shared deduplicator
+		// collapses both into one).
 		const eventId = header?.event_id ?? "";
-		if (eventId && this.isDuplicate(eventId)) {
+		if (eventId && !this.deduplicator.markSeen(eventId)) {
 			this.logger.debug(
 				`Ignoring duplicate Feishu event ${eventId} (already processed)`,
 			);
 			reply.code(200).send({ code: 0 });
 			return;
-		}
-		if (eventId) {
-			this.remember(eventId);
 		}
 
 		const messageEvent = envelope.event as
@@ -386,24 +390,6 @@ export class FeishuEventTransport extends EventEmitter {
 		this.emitMessage(webhookEvent);
 
 		reply.code(200).send({ code: 0 });
-	}
-
-	private isDuplicate(eventId: string): boolean {
-		this.pruneRecentEventIds();
-		return this.recentEventIds.has(eventId);
-	}
-
-	private remember(eventId: string): void {
-		this.recentEventIds.set(eventId, Date.now());
-	}
-
-	private pruneRecentEventIds(): void {
-		const now = Date.now();
-		for (const [key, seenAt] of this.recentEventIds) {
-			if (now - seenAt > FeishuEventTransport.DEDUP_TTL_MS) {
-				this.recentEventIds.delete(key);
-			}
-		}
 	}
 
 	private emitMessage(event: FeishuWebhookEvent): void {

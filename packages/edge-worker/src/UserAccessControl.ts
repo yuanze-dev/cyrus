@@ -17,45 +17,59 @@ export const DEFAULT_BLOCK_MESSAGE =
 	"{{userName}}, you are not authorized to delegate issues to this agent.";
 
 /**
- * Checks if a user matches a given identifier.
- * @param userId - The user's Linear ID
- * @param userEmail - The user's email address
+ * The identifying attributes of the subject being access-checked. A Linear
+ * delegation carries `userId`/`userEmail`; a Feishu chat message carries only an
+ * `openId`. Any subset may be present.
+ */
+export interface AccessSubject {
+	/** The user's Linear ID */
+	userId?: string;
+	/** The user's email address */
+	userEmail?: string;
+	/** The user's Feishu (Lark) open_id (e.g. "ou_...") */
+	openId?: string;
+}
+
+/**
+ * Checks if a subject matches a given identifier.
+ * @param subject - The identifying attributes of the user being checked
  * @param identifier - The identifier to match against
- * @returns true if the user matches the identifier
+ * @returns true if the subject matches the identifier
  */
 function userMatchesIdentifier(
-	userId: string | undefined,
-	userEmail: string | undefined,
+	subject: AccessSubject,
 	identifier: UserIdentifier,
 ): boolean {
 	if (typeof identifier === "string") {
 		// String is treated as user ID
-		return userId === identifier;
+		return subject.userId === identifier;
 	}
 	if ("id" in identifier) {
-		return userId === identifier.id;
+		return subject.userId === identifier.id;
 	}
 	if ("email" in identifier) {
 		// Case-insensitive email comparison
-		return userEmail?.toLowerCase() === identifier.email.toLowerCase();
+		return subject.userEmail?.toLowerCase() === identifier.email.toLowerCase();
+	}
+	if ("openId" in identifier) {
+		// Feishu open_ids are opaque, case-sensitive tokens — exact match only.
+		return subject.openId === identifier.openId;
 	}
 	return false;
 }
 
 /**
- * Checks if a user matches any identifier in a list.
- * @param userId - The user's Linear ID
- * @param userEmail - The user's email address
+ * Checks if a subject matches any identifier in a list.
+ * @param subject - The identifying attributes of the user being checked
  * @param identifiers - List of identifiers to check against
- * @returns true if the user matches any identifier
+ * @returns true if the subject matches any identifier
  */
 function userMatchesAny(
-	userId: string | undefined,
-	userEmail: string | undefined,
+	subject: AccessSubject,
 	identifiers: UserIdentifier[],
 ): boolean {
 	return identifiers.some((identifier) =>
-		userMatchesIdentifier(userId, userEmail, identifier),
+		userMatchesIdentifier(subject, identifier),
 	);
 }
 
@@ -91,17 +105,37 @@ export class UserAccessControl {
 
 	/**
 	 * Check if a user is allowed to delegate issues to a specific repository.
-	 * @param userId - The user's Linear ID
-	 * @param userEmail - The user's email address
-	 * @param repositoryId - The target repository ID
+	 *
+	 * Accepts either the legacy positional form — `(userId, userEmail, repoId)`,
+	 * used by the Linear delegation path — or an {@link AccessSubject} plus repo id.
+	 * The subject form is how the Feishu chat path passes an `openId` with no Linear
+	 * identity (IN-50).
+	 *
+	 * @param subjectOrUserId - An {@link AccessSubject}, or the user's Linear ID
+	 * @param userEmailOrRepositoryId - The user's email (positional form) or, when
+	 *   the first arg is a subject, the target repository ID
+	 * @param repositoryId - The target repository ID (positional form only)
 	 * @returns AccessCheckResult indicating if access is allowed
 	 */
 	checkAccess(
-		userId: string | undefined,
-		userEmail: string | undefined,
-		repositoryId: string,
+		subjectOrUserId: AccessSubject | string | undefined,
+		userEmailOrRepositoryId: string | undefined,
+		repositoryId?: string,
 	): AccessCheckResult {
-		const repoConfig = this.repoConfigs.get(repositoryId);
+		let subject: AccessSubject;
+		let repoId: string;
+		if (typeof subjectOrUserId === "object" && subjectOrUserId !== null) {
+			subject = subjectOrUserId;
+			repoId = userEmailOrRepositoryId ?? "";
+		} else {
+			subject = {
+				userId: subjectOrUserId,
+				userEmail: userEmailOrRepositoryId,
+			};
+			repoId = repositoryId ?? "";
+		}
+
+		const repoConfig = this.repoConfigs.get(repoId);
 
 		// Step 1: Build effective blocklist (global + repo, union)
 		const effectiveBlocklist: UserIdentifier[] = [
@@ -112,7 +146,7 @@ export class UserAccessControl {
 		// Step 2: Check if user is in blocklist
 		if (
 			effectiveBlocklist.length > 0 &&
-			userMatchesAny(userId, userEmail, effectiveBlocklist)
+			userMatchesAny(subject, effectiveBlocklist)
 		) {
 			return {
 				allowed: false,
@@ -139,7 +173,7 @@ export class UserAccessControl {
 				};
 			}
 
-			if (!userMatchesAny(userId, userEmail, effectiveAllowlist)) {
+			if (!userMatchesAny(subject, effectiveAllowlist)) {
 				return {
 					allowed: false,
 					reason: "User is not in allowlist",

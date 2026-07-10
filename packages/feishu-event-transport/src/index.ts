@@ -1,3 +1,4 @@
+export { EventDeduplicator } from "./EventDeduplicator.js";
 export { FeishuEventTransport } from "./FeishuEventTransport.js";
 export type {
 	FeishuDownloadResourceParams,

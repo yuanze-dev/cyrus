@@ -558,4 +558,147 @@ describe("UserAccessControl", () => {
 			expect(accessControl.hasAnyConfiguration()).toBe(true);
 		});
 	});
+
+	// ==========================================================================
+	// TESTS: open_id dimension (Feishu chat users) — IN-50
+	// ==========================================================================
+
+	describe("open_id dimension (Feishu)", () => {
+		describe("subject form checkAccess({ openId }, repoId)", () => {
+			it("allows any open_id when no access control configured", () => {
+				const accessControl = createAccessControl(undefined, new Map());
+				const result = accessControl.checkAccess(
+					{ openId: "ou_anyone" },
+					"repo-1",
+				);
+				expect(result.allowed).toBe(true);
+			});
+
+			it("blocks an open_id in the global blocklist", () => {
+				const accessControl = createAccessControl(
+					{ blockedUsers: [{ openId: "ou_blocked" }] },
+					new Map(),
+				);
+				const result = accessControl.checkAccess(
+					{ openId: "ou_blocked" },
+					"repo-1",
+				);
+				expect(result.allowed).toBe(false);
+				if (!result.allowed) {
+					expect(result.reason).toBe("User is in blocklist");
+				}
+			});
+
+			it("allows an open_id not in the blocklist", () => {
+				const accessControl = createAccessControl(
+					{ blockedUsers: [{ openId: "ou_blocked" }] },
+					new Map(),
+				);
+				const result = accessControl.checkAccess(
+					{ openId: "ou_other" },
+					"repo-1",
+				);
+				expect(result.allowed).toBe(true);
+			});
+
+			it("matches open_id exactly (case-sensitive)", () => {
+				const accessControl = createAccessControl(
+					{ blockedUsers: [{ openId: "ou_ABC" }] },
+					new Map(),
+				);
+				expect(
+					accessControl.checkAccess({ openId: "ou_abc" }, "repo-1").allowed,
+				).toBe(true);
+				expect(
+					accessControl.checkAccess({ openId: "ou_ABC" }, "repo-1").allowed,
+				).toBe(false);
+			});
+
+			it("allows only allowlisted open_ids when an allowlist is set", () => {
+				const accessControl = createAccessControl(
+					{ allowedUsers: [{ openId: "ou_allowed" }] },
+					new Map(),
+				);
+				expect(
+					accessControl.checkAccess({ openId: "ou_allowed" }, "repo-1").allowed,
+				).toBe(true);
+				const denied = accessControl.checkAccess(
+					{ openId: "ou_stranger" },
+					"repo-1",
+				);
+				expect(denied.allowed).toBe(false);
+				if (!denied.allowed) {
+					expect(denied.reason).toBe("User is not in allowlist");
+				}
+			});
+
+			it("blocklist wins over allowlist for the same open_id", () => {
+				const accessControl = createAccessControl(
+					{
+						allowedUsers: [{ openId: "ou_x" }],
+						blockedUsers: [{ openId: "ou_x" }],
+					},
+					new Map(),
+				);
+				expect(
+					accessControl.checkAccess({ openId: "ou_x" }, "repo-1").allowed,
+				).toBe(false);
+			});
+
+			it("honors a repo-scoped open_id allowlist", () => {
+				const repoConfigs = new Map<string, UserAccessControlConfig>([
+					["repo-1", { allowedUsers: [{ openId: "ou_team" }] }],
+				]);
+				const accessControl = createAccessControl(undefined, repoConfigs);
+				expect(
+					accessControl.checkAccess({ openId: "ou_team" }, "repo-1").allowed,
+				).toBe(true);
+				expect(
+					accessControl.checkAccess({ openId: "ou_team" }, "repo-2").allowed,
+				).toBe(true); // repo-2 has no allowlist → everyone allowed
+				expect(
+					accessControl.checkAccess({ openId: "ou_outsider" }, "repo-1")
+						.allowed,
+				).toBe(false);
+			});
+
+			it("does not match an open_id against a Linear id/email identifier", () => {
+				const accessControl = createAccessControl(
+					{ blockedUsers: ["ou_blocked", { email: "ou_blocked" }] },
+					new Map(),
+				);
+				// The subject carries only an openId; id/email identifiers must not match it.
+				expect(
+					accessControl.checkAccess({ openId: "ou_blocked" }, "repo-1").allowed,
+				).toBe(true);
+			});
+
+			it("a Linear subject is not blocked by an open_id identifier", () => {
+				const accessControl = createAccessControl(
+					{ blockedUsers: [{ openId: "ou_blocked" }] },
+					new Map(),
+				);
+				const result = accessControl.checkAccess(
+					{ userId: "ou_blocked", userEmail: "u@example.com" },
+					"repo-1",
+				);
+				expect(result.allowed).toBe(true);
+			});
+		});
+
+		describe("legacy positional form still works alongside open_id configs", () => {
+			it("blocks a Linear user by id even when open_id identifiers are present", () => {
+				const accessControl = createAccessControl(
+					{ blockedUsers: [{ openId: "ou_x" }, "linear-blocked"] },
+					new Map(),
+				);
+				const result = accessControl.checkAccess(
+					"linear-blocked",
+					"user@example.com",
+					"repo-1",
+				);
+				expect(result.allowed).toBe(false);
+			});
+		});
+	});
 });
