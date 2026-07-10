@@ -40,6 +40,7 @@ import type {
 	IssueStateChangeMessage,
 	IssueUnassignedWebhook,
 	IssueUpdateWebhook,
+	MessageSource,
 	RepositoryConfig,
 	RunnerType,
 	SerializableEdgeWorkerState,
@@ -260,6 +261,26 @@ export class EdgeWorker extends EventEmitter {
 	public repositoryRouter: RepositoryRouter; // Repository routing and selection
 	private gitService: GitService;
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
+	/**
+	 * IN-42 §5 P2 — webhook-handoff bridge for the "switch" phase of the
+	 * shadow→switch migration. When the InternalMessage bus owns a Linear
+	 * session lifecycle event (see {@link getBusOwnershipMode}), the legacy
+	 * `handleWebhook` path stashes the raw webhook here and early-returns; the
+	 * corresponding bus handler ({@link handleSessionStartMessage} /
+	 * {@link handleUserPromptMessage}) consumes it and drives the real,
+	 * battle-tested legacy execution with the original webhook — no lossy
+	 * reconstruction. Keyed by the Linear agentSession.id (== message.sessionKey).
+	 *
+	 * Ordering is safe: transports emit `event` before `message` synchronously,
+	 * so the stash is written by handleWebhook's synchronous prologue before the
+	 * message handler runs. Entries are deleted on consume; a bounded sweep
+	 * guards against leaks if a translated message never arrives.
+	 */
+	private pendingLifecycleWebhooks = new Map<
+		string,
+		{ webhook: Webhook; repos: RepositoryConfig[]; storedAt: number }
+	>();
+	private static readonly PENDING_LIFECYCLE_WEBHOOK_MAX = 256;
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
 	private askUserQuestionHandler: AskUserQuestionHandler;
 	/** User access control for whitelisting/blacklisting Linear users */
@@ -3547,8 +3568,34 @@ ${taskSection}`;
 				// Keep unassigned webhook active
 				await this.handleIssueUnassignedWebhook(webhook);
 			} else if (isAgentSessionCreatedWebhook(webhook)) {
+				// IN-42 §5 P2 "switch": when the bus owns Linear session lifecycle,
+				// hand the raw webhook to the message path and early-return so the
+				// runner is started exactly once (bus, not legacy). Only stash when
+				// the issue is present — mirrors the translator's success condition,
+				// so a message is guaranteed to follow and consume the stash.
+				if (
+					this.getBusOwnershipMode("linear") === "active" &&
+					webhook.agentSession?.issue
+				) {
+					this.stashLifecycleWebhook(webhook.agentSession.id, webhook, repos);
+					return;
+				}
 				await this.handleAgentSessionCreatedWebhook(webhook, repos);
 			} else if (isAgentSessionPromptedWebhook(webhook)) {
+				// Only non-stop prompts are translated to `user_prompt` messages;
+				// stop signals become `stop_signal` (still handled by the legacy
+				// path in P2). Mirror that split so a stop is never dropped.
+				const isStopSignal =
+					(webhook.agentActivity as { signal?: string } | undefined)?.signal ===
+					"stop";
+				if (
+					!isStopSignal &&
+					this.getBusOwnershipMode("linear") === "active" &&
+					webhook.agentSession?.issue
+				) {
+					this.stashLifecycleWebhook(webhook.agentSession.id, webhook, repos);
+					return;
+				}
 				await this.handleUserPromptedAgentActivity(webhook);
 			} else if (isIssueStateChangeWebhook(webhook)) {
 				// Intentional early return: state changes are handled exclusively via the message bus
@@ -3716,37 +3763,221 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Handle session start message (unified handler for session creation).
+	 * Bus ownership mode for a given platform source (IN-42 §5 P2).
 	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleAgentSessionCreatedWebhook and handleGitHubWebhook.
+	 * Controls the shadow→switch migration of session-lifecycle handling onto the
+	 * InternalMessage bus. Driven by the `CYRUS_BUS_SESSION_OWNERSHIP` env var so
+	 * the migration is opt-in and instantly reversible without a config-schema
+	 * change (the whole point of a staged, risky seam):
+	 *   - unset / "shadow" / "off"  → shadow (default): legacy `event` path owns
+	 *     execution; the bus only records correlation + logs a parity comparison.
+	 *   - "active" / "all" / "on"    → bus owns every source.
+	 *   - comma list (e.g. "linear") → bus owns only the listed sources.
+	 */
+	private getBusOwnershipMode(source: MessageSource): "shadow" | "active" {
+		const raw = (process.env.CYRUS_BUS_SESSION_OWNERSHIP || "")
+			.trim()
+			.toLowerCase();
+		if (!raw || raw === "shadow" || raw === "off") return "shadow";
+		if (raw === "active" || raw === "all" || raw === "on") return "active";
+		const owned = raw.split(",").map((s) => s.trim());
+		return owned.includes(source) ? "active" : "shadow";
+	}
+
+	/**
+	 * Stash a raw Linear lifecycle webhook for the bus to consume during the
+	 * "switch" phase. See {@link pendingLifecycleWebhooks}.
+	 */
+	private stashLifecycleWebhook(
+		key: string,
+		webhook: Webhook,
+		repos: RepositoryConfig[],
+	): void {
+		// Bounded sweep: drop the oldest entries if a message never arrived to
+		// consume them (translation failure, unexpected shape, etc.).
+		if (
+			this.pendingLifecycleWebhooks.size >=
+			EdgeWorker.PENDING_LIFECYCLE_WEBHOOK_MAX
+		) {
+			const oldestKey = this.pendingLifecycleWebhooks.keys().next().value;
+			if (oldestKey !== undefined) {
+				this.pendingLifecycleWebhooks.delete(oldestKey);
+				this.logger.warn(
+					`[MessageBus] Dropped stale stashed lifecycle webhook ${oldestKey} (cap reached)`,
+				);
+			}
+		}
+		this.pendingLifecycleWebhooks.set(key, {
+			webhook,
+			repos,
+			storedAt: Date.now(),
+		});
+	}
+
+	/**
+	 * Consume (read + delete) a stashed lifecycle webhook by key.
+	 */
+	private takeStashedLifecycleWebhook(
+		key: string,
+	): { webhook: Webhook; repos: RepositoryConfig[] } | undefined {
+		const entry = this.pendingLifecycleWebhooks.get(key);
+		if (!entry) return undefined;
+		this.pendingLifecycleWebhooks.delete(key);
+		return { webhook: entry.webhook, repos: entry.repos };
+	}
+
+	/**
+	 * Compute a side-effect-free parity snapshot for a session-start message.
+	 * Used both by shadow-mode logging (AC: "correlation 记录与 legacy 行为一致")
+	 * and by unit tests to assert the bus's routing decision without starting a
+	 * runner.
+	 */
+	private computeSessionStartParity(message: SessionStartMessage): {
+		source: MessageSource;
+		sessionKey: string;
+		workItemIdentifier: string;
+		resolvedSessionId?: string;
+		willReuseExistingSession: boolean;
+	} {
+		const resolvedSessionId = this.resolveMessageSession(message);
+		return {
+			source: message.source,
+			sessionKey: message.sessionKey,
+			workItemIdentifier: message.workItemIdentifier,
+			resolvedSessionId,
+			// A session-start whose key already resolves means the logical session
+			// exists (e.g. an @mention on an issue that already has a session).
+			willReuseExistingSession: Boolean(resolvedSessionId),
+		};
+	}
+
+	/**
+	 * Compute a side-effect-free parity snapshot for a user-prompt message.
+	 * `willInjectIntoExistingSession` mirrors the AC dichotomy: resolve() hit →
+	 * inject into the existing session (P3); miss → treat as session start.
+	 */
+	private computeUserPromptParity(message: UserPromptMessage): {
+		source: MessageSource;
+		sessionKey: string;
+		workItemIdentifier: string;
+		resolvedSessionId?: string;
+		willInjectIntoExistingSession: boolean;
+	} {
+		const resolvedSessionId = this.resolveMessageSession(message);
+		return {
+			source: message.source,
+			sessionKey: message.sessionKey,
+			workItemIdentifier: message.workItemIdentifier,
+			resolvedSessionId,
+			willInjectIntoExistingSession: Boolean(resolvedSessionId),
+		};
+	}
+
+	/**
+	 * Resolve the logical session id an incoming message maps to, checking the
+	 * primary key first and then any equally-valid aliases (Feishu topic shift).
+	 */
+	private resolveMessageSession(message: InternalMessage): string | undefined {
+		const primary = this.globalSessionRegistry.resolve(message.sessionKey);
+		if (primary) return primary;
+		for (const alias of message.sessionKeyAliases ?? []) {
+			const resolved = this.globalSessionRegistry.resolve(alias);
+			if (resolved) return resolved;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Handle session start message (unified entry point for session creation).
+	 *
+	 * IN-42 §5 P2. In shadow mode (default) the legacy `event` path owns
+	 * execution and this only records the channel↔session correlation (already
+	 * done in {@link shadowRecordChannelCorrelation}) plus a parity log. In
+	 * active mode the bus owns execution: it consumes the raw webhook stashed by
+	 * the legacy path and drives the same, fully-tested
+	 * {@link handleAgentSessionCreatedWebhook} — so the bus becomes the single
+	 * dispatch point without reimplementing routing / access control / parking.
 	 */
 	private async handleSessionStartMessage(
 		message: SessionStartMessage,
 	): Promise<void> {
+		const mode = this.getBusOwnershipMode(message.source);
+		const parity = this.computeSessionStartParity(message);
 		this.logger.debug(
-			`[MessageBus] Session start: ${message.workItemIdentifier} from ${message.source}`,
+			`[MessageBus] session_start parity (${mode}): ${message.workItemIdentifier} from ${message.source}`,
+			parity,
 		);
-		// TODO: Implement unified session start handling
-		// For now, the legacy handlers (handleAgentSessionCreatedWebhook, handleGitHubWebhook)
-		// continue to process the actual session creation via the 'event' emitter.
+
+		if (mode === "shadow") {
+			// Legacy path owns execution — do not start a runner here.
+			return;
+		}
+
+		// Active: bus owns execution.
+		if (message.source === "linear") {
+			const stashed = this.takeStashedLifecycleWebhook(message.sessionKey);
+			if (stashed && isAgentSessionCreatedWebhook(stashed.webhook)) {
+				await this.handleAgentSessionCreatedWebhook(
+					stashed.webhook,
+					stashed.repos,
+				);
+				return;
+			}
+			this.logger.warn(
+				`[MessageBus] Active session_start for ${message.workItemIdentifier} found no stashed webhook; legacy fallback expected`,
+			);
+			return;
+		}
+
+		// Non-Linear sources are not yet switched onto the bus (their legacy chat
+		// path still owns execution). Shadow-record only.
+		this.logger.debug(
+			`[MessageBus] session_start active mode not wired for source ${message.source}; leaving to legacy`,
+		);
 	}
 
 	/**
-	 * Handle user prompt message (unified handler for mid-session prompts).
+	 * Handle user prompt message (unified entry point for mid-session prompts).
 	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleUserPromptedAgentActivity (branch 3).
+	 * IN-42 §5 P2. Shadow mode records parity only. Active mode: a resolve() hit
+	 * means the logical session exists → inject into it; a miss means treat as a
+	 * session start. Both are already implemented, correctly, by the legacy
+	 * {@link handleUserPromptedAgentActivity} (which routes selection responses,
+	 * parked-session re-prompts, and normal continuations off the issue→repo
+	 * cache), so the active path delegates to it with the original webhook.
+	 * Cross-channel injection into a *foreign* session is deferred to P3.
 	 */
 	private async handleUserPromptMessage(
 		message: UserPromptMessage,
 	): Promise<void> {
+		const mode = this.getBusOwnershipMode(message.source);
+		const parity = this.computeUserPromptParity(message);
 		this.logger.debug(
-			`[MessageBus] User prompt: ${message.workItemIdentifier} from ${message.source}`,
+			`[MessageBus] user_prompt parity (${mode}): ${message.workItemIdentifier} from ${message.source}`,
+			parity,
 		);
-		// TODO: Implement unified user prompt handling
-		// For now, the legacy handler (handleUserPromptedAgentActivity)
-		// continues to process the actual prompt via the 'event' emitter.
+
+		if (mode === "shadow") {
+			// Legacy path owns execution.
+			return;
+		}
+
+		// Active: bus owns execution.
+		if (message.source === "linear") {
+			const stashed = this.takeStashedLifecycleWebhook(message.sessionKey);
+			if (stashed && isAgentSessionPromptedWebhook(stashed.webhook)) {
+				await this.handleUserPromptedAgentActivity(stashed.webhook);
+				return;
+			}
+			this.logger.warn(
+				`[MessageBus] Active user_prompt for ${message.workItemIdentifier} found no stashed webhook; legacy fallback expected`,
+			);
+			return;
+		}
+
+		this.logger.debug(
+			`[MessageBus] user_prompt active mode not wired for source ${message.source}; leaving to legacy`,
+		);
 	}
 
 	/**
