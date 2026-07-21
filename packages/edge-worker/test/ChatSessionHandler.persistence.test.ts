@@ -141,8 +141,19 @@ function restart(
 
 	const asm2 = new AgentSessionManager();
 	asm2.restoreState(asmState.sessions, asmState.entries);
+	// Rebuild the correlation registry the same way EdgeWorker.restoreMappings
+	// does — directly from the serialized maps via setParentSession + bind.
 	const registry2 = new SessionCorrelationRegistry();
-	registry2.restoreState(registryState);
+	for (const [childId, parentId] of Object.entries(
+		registryState.childToParentMap,
+	)) {
+		registry2.setParentSession(childId, parentId);
+	}
+	for (const [channelKey, sessionId] of Object.entries(
+		registryState.sessionChannelIndex,
+	)) {
+		registry2.bind(channelKey, sessionId);
+	}
 	return { asm: asm2, registry: registry2 };
 }
 

@@ -215,8 +215,16 @@ sequenceDiagram
 - **P5 — 权限与去重加固**
   - `UserAccessControl` 增 open_id 维度；统一去重层（可选合并 WS/HTTP event_id 去重）；回环幂等标记。
 
-- **P6 — 清理**
-  - 移除 legacy `event` 处理路径中已被 bus 接管的分支；删死代码（`GlobalSessionRegistry` 旧 API 若未复用）。
+- **P6 — 清理**（IN-51）
+  - 计划：移除 legacy `event` 处理路径中已被 bus 接管的分支；删死代码（`GlobalSessionRegistry` 旧 API 若未复用）。
+  - **实际落地**：删死代码已完成——`SessionCorrelationRegistry`（旧 `GlobalSessionRegistry`）的 session/entry 存储半边（`createSession`/`getSession`/`updateSession`/`deleteSession`/`getAllSessions`/`addEntry`/`getEntries`/`updateEntry`/`getChildSessionIds`/`restoreState`/`cleanup` + 未用的 `unbind`/`getChannelKeysForSession` + `EventEmitter` 事件 + `sessions`/`entries` 两张 Map）从未接生产（session 真相源是 `AgentSessionManager`），全部移除；仅保留实际在用的 child→parent map（`setParentSession`/`getParentSessionId`）与 channelKey→sessionId 索引（`bind`/`resolve`/`serializeState`）。
+  - **有意推迟**：移除 legacy `event` 分支**未做**。原因：bus 目前仍是默认 shadow（`CYRUS_BUS_SESSION_OWNERSHIP` 默认关；飞书/Slack/GitHub/GitLab 及 Linear 的 stop/content-update/unassign 尚无 active bus 执行路径），只有 Linear issue-state-change/deletion 真正由 bus 接管（且已是干净的 early-return，其后无死代码）。默认运行时仍走 legacy，删掉即破坏默认行为。legacy 移除须等 bus 提升为 active-by-default 并跨渠道验证后进行——见下方「§5 后续（P6 之后）」。
+
+- **§5 后续（P6 之后，尚未拆子任务）** — 真正「合并入口 + 拆 legacy」的剩余工作：
+  1. 实现仍为 TODO 占位的 `handleStopSignalMessage`/`handleContentUpdateMessage`/`handleUnassignMessage`（`EdgeWorker.ts`）。
+  2. 把 Feishu/Slack/GitHub/GitLab 的 `handle*Message` 从 shadow/no-op 接成真实执行（当前它们都「leaving to legacy」）。
+  3. 将 `CYRUS_BUS_SESSION_OWNERSHIP`（及 `CYRUS_CROSS_CHANNEL_INJECTION`/`CYRUS_FEISHU_BACKFLOW`）灰度放量至 active-by-default，跨渠道验证拉起/注入/回流/重启恢复无差异。
+  4. 待 (1)-(3) 稳定后，才移除 legacy `event` 处理分支，收敛为单一 bus 入口。
 
 **复用 vs 新增小结**：
 - **复用**：`InternalMessage` 总线与 `sessionKey`、`handleMessage` 分发骨架、`AgentSessionManager` 单例与持久化、`ChatSessionHandler` 注入三态、`RunnerSelectionService`、`FeishuIssueNotificationService` 回帖通道、`GlobalSessionRegistry` 的 map 机制。
