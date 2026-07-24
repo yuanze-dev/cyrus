@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- Updated the Claude Code engine integration to `@anthropic-ai/claude-agent-sdk` 0.3.205. The `LSP` tool was removed upstream and is no longer offered to sessions; the built-in tool catalog now matches the SDK (29 available / 12 read-only tools).
 - Cyrus's Feishu (Lark) replies now pick the message type to match the content: a plain-text answer (like a bare "你好") goes out as an ordinary message bubble instead of being wrapped in a card, and only replies that actually contain Markdown (bold, lists, links, code, quotes, dividers, …) are posted as an interactive card. The card-send failure fallback to plain text is unchanged. ([IN-17](https://linear.app/principle-intl/issue/IN-17), [#7](https://github.com/yuanze-dev/cyrus/pull/7))
 - Cyrus's replies in Feishu (Lark) threads now render Markdown. Answers are posted as an interactive card, so **bold**, *italic*, ordered/unordered lists, inline and fenced code blocks, links, block quotes and dividers show up styled instead of as raw `**source**` text. If a card ever fails to send, Cyrus automatically falls back to a plain-text reply so you always get an answer (the reason is logged). Internal notices (e.g. the "still working on the previous request" message) stay plain text. ([IN-14](https://linear.app/principle-intl/issue/IN-14))
 
@@ -34,6 +35,7 @@ All notable changes to this project will be documented in this file.
 - Refreshed Claude Code tool list: added `DesignSync`, removed deprecated `TeamCreate` and `TeamDelete` tools. ([CYPACK-1346](https://linear.app/ceedar/issue/CYPACK-1346), [#1342](https://github.com/cyrusagents/cyrus/pull/1342))
 
 ### Security
+- Patched all known dependency security advisories across the workspace; `pnpm audit` now reports zero vulnerabilities. Direct-dependency updates (fastify 5.10, `@sentry/node` 10.65, nodemon 3.1, tsx 4.23, `@larksuiteoapi/node-sdk` 1.71) let the root `pnpm.overrides` list shrink from ~30 entries to a small floor set covering only transitives that direct bumps cannot reach (axios ≥1.18, postcss ≥8.5.12, sharp ≥0.35, plus hono/opentelemetry floors).
 - Patched the tracked Cyrus CLI Bun lockfile so both `pnpm audit` and `bun audit` report no known vulnerabilities. ([CYPACK-1356](https://linear.app/ceedar/issue/CYPACK-1356), [#1353](https://github.com/cyrusagents/cyrus/pull/1353))
 
 ## [0.2.66] - 2026-06-19

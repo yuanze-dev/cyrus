@@ -16,9 +16,9 @@
 		"test:run": "vitest run"
 	},
 	"dependencies": {
-		"@larksuiteoapi/node-sdk": "^1.68.0",
+		"@larksuiteoapi/node-sdk": "^1.71.1",
 		"cyrus-core": "workspace:*",
-		"fastify": "^5.8.5"
+		"fastify": "^5.10.0"
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
