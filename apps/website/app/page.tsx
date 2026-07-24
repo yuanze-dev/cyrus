@@ -161,30 +161,14 @@ export default function Home() {
 			<header className="nav">
 				<div className="nav-inner">
 					<a className="brand" href="#top">
-						<svg
+						{/* biome-ignore lint/performance/noImgElement: 静态导出站点直接使用原生 img */}
+						<img
 							className="brand-mark"
-							width="24"
-							height="24"
-							viewBox="0 0 24 24"
-							fill="none"
-							aria-hidden="true"
-						>
-							<defs>
-								<linearGradient id="brand-g" x1="0" y1="0" x2="24" y2="24">
-									<stop stopColor="#191919" />
-									<stop offset="1" stopColor="#317cff" />
-								</linearGradient>
-							</defs>
-							<circle
-								cx="12"
-								cy="12"
-								r="8.5"
-								stroke="url(#brand-g)"
-								strokeWidth="2.2"
-							/>
-							<circle cx="12" cy="12" r="3" fill="url(#brand-g)" />
-							<circle cx="19.5" cy="6" r="2.2" fill="#317cff" />
-						</svg>
+							src="/icon.png"
+							alt=""
+							width={24}
+							height={24}
+						/>
 						<span className="brand-name">Xight</span>
 					</a>
 					<nav>
